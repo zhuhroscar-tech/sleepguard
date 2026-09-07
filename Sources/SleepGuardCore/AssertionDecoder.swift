@@ -7,12 +7,21 @@ import Foundation
 public struct DecodedAssertions: Sendable {
   public let observations: [AssertionObservation]
   public let malformedRecordCount: Int
+  /// True when IOKit reported success but handed back no table at all. IOPMLib.h
+  /// does not document NULL as meaning "no assertions", so this is an unproven
+  /// empty result, not a clean one.
+  public let sourceTableWasNull: Bool
 
-  public var isComplete: Bool { malformedRecordCount == 0 }
+  public var isComplete: Bool { malformedRecordCount == 0 && !sourceTableWasNull }
 
-  public init(observations: [AssertionObservation], malformedRecordCount: Int) {
+  public init(
+    observations: [AssertionObservation],
+    malformedRecordCount: Int,
+    sourceTableWasNull: Bool = false
+  ) {
     self.observations = observations
     self.malformedRecordCount = malformedRecordCount
+    self.sourceTableWasNull = sourceTableWasNull
   }
 }
 

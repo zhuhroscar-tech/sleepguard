@@ -27,7 +27,13 @@ do {
   // top of the output never sees a clean claim without its retraction.
   var uncertain = false
 
-  if !snapshot.isComplete {
+  if snapshot.sourceTableWasNull {
+    uncertain = true
+    print(
+      "WARNING: IOKit returned success but no assertion table. IOPMLib.h does not "
+        + "document this as meaning \"no assertions\", so this scan is INCOMPLETE.")
+  }
+  if snapshot.malformedRecordCount > 0 {
     uncertain = true
     print(
       "WARNING: \(snapshot.malformedRecordCount) assertion record(s) could not be decoded. "
@@ -60,6 +66,8 @@ do {
   if diagnosis.systemSleepBlockers.isEmpty {
     if diagnosis.canProveSleepIsUnblocked {
       print("No process-held assertion is blocking idle sleep.")
+    } else if sleepDisabled == true {
+      print("No process-held assertion is blocking idle sleep, but SleepDisabled=1 is.")
     } else {
       print("No *recognized* sleep-blocking assertion was found, but see the warnings above.")
     }
@@ -84,7 +92,10 @@ do {
       + "Kernel-level preventers (USB, IODisplayWrangler) and scheduled dark wakes "
       + "are NOT covered; see `pmset -g assertions` for those.")
 
-  exit(uncertain ? 2 : 0)
+  // Exit codes: 0 sleep provably unblocked, 3 sleep confirmed blocked,
+  // 2 scan incomplete (unknown), 1 IOKit read failure.
+  if uncertain { exit(2) }
+  exit(diagnosis.systemSleepIsBlocked == true ? 3 : 0)
 } catch {
   FileHandle.standardError.write(Data("sleepguard: \(error)\n".utf8))
   exit(1)

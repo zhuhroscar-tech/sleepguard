@@ -58,7 +58,27 @@ swift build -c release
 ./.build/release/sleepguard
 ```
 
-Exit codes: `0` complete scan, `1` IOKit read failure, `2` scan incomplete.
+Exit codes: `0` sleep provably unblocked, `3` sleep confirmed blocked, `2` scan
+incomplete (something could not be decoded, classified, or read), `1` IOKit read
+failure.
+
+## Classification authority
+
+Every assertion type is classified only on a citable `IOPMLib.h` statement.
+A type with no citation is left **unclassified** and makes the scan incomplete —
+it is never assumed harmless.
+
+| Type | Verdict | Header citation |
+|---|---|---|
+| `PreventUserIdleSystemSleep` | blocks | "will prevent the system from sleeping due to a period of idle user activity" |
+| `PreventSystemSleep` | blocks | documented system-sleep prevention |
+| `PreventUserIdleDisplaySleep` | blocks | "While the display is prevented from dimming, the system cannot go into idle sleep." |
+| `NetworkClientActive` | blocks | "this assertion can prevent system from going into idle sleep" |
+| `NoIdleSleepAssertion` | blocks | deprecated alias of the system-sleep type |
+| `PreventDiskIdle` | does not block | "The system may still sleep while this assertion is active." |
+
+`UserIsActive`, `BackgroundTask`, and similar names that appear in `pmset`
+output but in no IOKit header are deliberately **not** enumerated as harmless.
 
 ## Tests
 

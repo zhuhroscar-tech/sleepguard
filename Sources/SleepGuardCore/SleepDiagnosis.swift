@@ -41,26 +41,28 @@ public struct SleepDiagnosis: Sendable {
   ///
   /// `PreventUserIdleDisplaySleep` is included deliberately: IOPMLib.h states
   /// "While the display is prevented from dimming, the system cannot go into
-  /// idle sleep." It blocks idle sleep just as surely as the system types do.
+  /// idle sleep." `NetworkClientActive` likewise: "Keeps the system awake while
+  /// OS X serves active network clients... On battery, this assertion can
+  /// prevent system from going into idle sleep."
   static let systemSleepBlockingTypes: Set<String> = [
     "NoIdleSleepAssertion",
     "PreventUserIdleSystemSleep",
     "PreventSystemSleep",
     "PreventUserIdleDisplaySleep",
-    "InternalPreventSleep",
-    "InternalPreventDisplaySleep",
+    "NetworkClientActive",
   ]
 
-  /// Assertion types known NOT to prevent system idle sleep on their own.
+  /// Assertion types with a citable IOPMLib.h statement that they do NOT prevent
+  /// system idle sleep on their own.
+  ///
+  /// Membership requires an explicit header citation. A type that merely looks
+  /// harmless, or whose name suggests it, is left unclassified instead — the
+  /// tool must never certify a blocker as harmless on an unsourced guess.
+  ///
+  /// `PreventDiskIdle`: "The system may still sleep while this assertion is
+  /// active."
   static let knownNonBlockingTypes: Set<String> = [
-    "PreventDiskIdle",
-    "UserIsActive",
-    "NetworkClientActive",
-    "BackgroundTask",
-    "ApplePushServiceTask",
-    "ExternalMedia",
-    "EnableIdleSleep",
-    "DenySystemSleep",
+    "PreventDiskIdle"
   ]
 
   public init(observations: [AssertionObservation], sleepDisabledSetting: Bool?) {
@@ -81,8 +83,14 @@ public struct SleepDiagnosis: Sendable {
     }
   }
 
-  public var systemSleepIsBlocked: Bool {
-    (sleepDisabledSetting ?? false) || !systemSleepBlockers.isEmpty
+  /// Tri-state verdict. `nil` means "cannot determine": no confirmed blocker was
+  /// found, but the standing setting could not be read, so the absence of a
+  /// blocker is not provable. Never collapses unknown into "not blocked".
+  public var systemSleepIsBlocked: Bool? {
+    if !systemSleepBlockers.isEmpty { return true }
+    if sleepDisabledSetting == true { return true }
+    if sleepDisabledSetting == nil { return nil }
+    return false
   }
 
   /// True only when a clean result is actually provable: no blockers, no

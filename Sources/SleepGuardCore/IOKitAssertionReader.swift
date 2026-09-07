@@ -27,8 +27,10 @@ public struct IOKitAssertionReader {
     guard status == kIOReturnSuccess else { throw AssertionReadError.ioKitFailure(status) }
 
     guard let table = unmanaged?.takeRetainedValue() else {
-      // A NULL table is IOKit's documented representation of "no assertions".
-      return DecodedAssertions(observations: [], malformedRecordCount: 0)
+      // IOPMLib.h documents only kIOReturnSuccess and a per-PID dictionary; it
+      // never states that NULL means "no assertions". Treat it as unproven.
+      return DecodedAssertions(
+        observations: [], malformedRecordCount: 0, sourceTableWasNull: true)
     }
     return try Self.decodeSnapshot(rawTable: table, now: now)
   }
@@ -45,20 +47,25 @@ public struct IOKitAssertionReader {
     var normalized: [Int32: [[String: Any]]] = [:]
     var malformedTopLevel = 0
     for (key, value) in raw {
-      guard
-        let pidNumber = key as? NSNumber,
-        let records = value as? [[String: Any]]
-      else {
+      guard let pidNumber = key as? NSNumber, let elements = value as? [Any] else {
         malformedTopLevel += 1
         continue
       }
-      normalized[pidNumber.int32Value, default: []].append(contentsOf: records)
+      // Cast per element so one bad record does not discard a PID's valid ones.
+      for element in elements {
+        if let record = element as? [String: Any] {
+          normalized[pidNumber.int32Value, default: []].append(record)
+        } else {
+          malformedTopLevel += 1
+        }
+      }
     }
 
     let decoded = AssertionDecoder.decode(assertionsByProcess: normalized, now: now)
     return DecodedAssertions(
       observations: decoded.observations,
-      malformedRecordCount: decoded.malformedRecordCount + malformedTopLevel
+      malformedRecordCount: decoded.malformedRecordCount + malformedTopLevel,
+      sourceTableWasNull: false
     )
   }
 
