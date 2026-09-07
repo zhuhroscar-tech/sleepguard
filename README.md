@@ -33,9 +33,15 @@ Verified locally on macOS 15.7.4 (24G517): a single Electron app held a
   can exit and be reused, so nothing is ever acted upon.
 - Anything it cannot decode, cannot classify, or cannot read marks the scan
   **incomplete** (exit `2`) rather than reporting a clean result. Absence of
-  evidence is not evidence of absence. This covers three distinct cases: an
+  evidence is not evidence of absence. This covers four distinct cases: an
   undecodable assertion record, an assertion type this build does not recognize,
-  and a failed `SleepDisabled` lookup.
+  a failed `SleepDisabled` lookup, and an assertion table that comes back empty
+  (a running Mac always holds at least one process assertion, so zero entries
+  means a failed or restricted read, not an idle system).
+- The fail-closed rule is enforced in `SleepGuardCore` itself, not just in the
+  CLI: `SleepDiagnosis` requires a `sourceWasComplete` argument with no default,
+  so a library consumer cannot obtain a provably-clean verdict from an
+  incomplete snapshot by forgetting to check a flag.
 
 ## Known scope limits
 
@@ -58,9 +64,21 @@ swift build -c release
 ./.build/release/sleepguard
 ```
 
-Exit codes: `0` sleep provably unblocked, `3` sleep confirmed blocked, `2` scan
-incomplete (something could not be decoded, classified, or read), `1` IOKit read
-failure.
+Exit codes, in precedence order:
+
+| Code | Meaning |
+|---|---|
+| `1` | IOKit read failure — nothing could be determined |
+| `2` | Scan incomplete: something could not be decoded, classified, or read |
+| `3` | Sleep confirmed blocked, and the scan was otherwise complete |
+| `0` | Sleep provably unblocked |
+
+**`2` outranks `3`.** If a confirmed blocker is found *and* anything was
+unreadable, the exit code is `2`, and the blocker is still printed in full. In
+practice `2` is the common case on an interactive Mac, because `WindowServer`
+holds a `UserIsActive` assertion that no IOKit header classifies, and this tool
+refuses to assume an unsourced type is harmless. Read the printed findings, not
+only the status code.
 
 ## Classification authority
 
@@ -87,8 +105,15 @@ This host has only the Command Line Tools toolchain, so `XCTest` and
 executable that exits non-zero on any failed assertion:
 
 ```sh
-swift run sleepguard-tests
+swift run sleepguard-tests                 # deterministic unit tests only
+RUN_LIVE_TESTS=1 swift run sleepguard-tests # also reads live IOKit state
 ```
+
+The two live-IOKit integration checks are opt-in behind `RUN_LIVE_TESTS=1`
+(accepted values `1`, `true`, `yes`, case- and whitespace-insensitive). They
+assert on real system state, so on a restricted or sandboxed host they would
+report a product defect that does not exist. When the gate is off the run prints
+an explicit `SKIP:` line — never a silent pass. CI runs both modes.
 
 Coverage: assertion-type classification (blocking, known-non-blocking, and
 unknown types), decoding of the `IOPMCopyAssertionsByProcess` dictionary shape,

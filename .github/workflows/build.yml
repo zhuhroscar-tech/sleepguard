@@ -1,0 +1,54 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      # actions/checkout v4 pinned to the immutable commit for tag v4 (v4.4.0),
+      # resolved via the GitHub API rather than trusting a mutable tag name.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: swift --version
+
+      - name: Lint (strict, includes Package.swift)
+        run: xcrun swift-format lint --recursive --strict Sources Package.swift
+
+      - name: Tests (unit only)
+        run: swift run sleepguard-tests
+
+      - name: Tests (including live IOKit reads)
+        env:
+          RUN_LIVE_TESTS: "1"
+        run: swift run sleepguard-tests
+
+      - name: Release build (warnings as errors)
+        run: swift build -c release -Xswiftc -warnings-as-errors
+
+      - name: Run the built binary
+        # Allowlist, not denylist: only 0 (provably unblocked), 2 (incomplete)
+        # and 3 (confirmed blocked) are successful runs. Anything else — 1 (IOKit
+        # read failure), 126/127 (not executable / missing binary), 132-139
+        # (SIGILL/SIGABRT/SIGSEGV runtime traps) — must fail the job.
+        run: |
+          set +e
+          ./.build/release/sleepguard
+          status=$?
+          set -e
+          echo "sleepguard exited with $status"
+          case "$status" in
+            0|2|3) ;;
+            *) echo "unexpected exit status $status"; exit 1 ;;
+          esac

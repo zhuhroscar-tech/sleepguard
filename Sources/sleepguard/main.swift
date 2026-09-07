@@ -16,8 +16,7 @@ let reader = IOKitAssertionReader()
 do {
   let snapshot = try reader.snapshot()
   let sleepDisabled = reader.sleepDisabledSetting()
-  let diagnosis = SleepDiagnosis(
-    observations: snapshot.observations, sleepDisabledSetting: sleepDisabled)
+  let diagnosis = SleepDiagnosis(snapshot: snapshot, sleepDisabledSetting: sleepDisabled)
 
   print("sleepguard — read-only sleep-blocker inspector (prototype)")
   print("scanned: \(ISO8601DateFormatter().string(from: Date()))")
@@ -32,6 +31,13 @@ do {
     print(
       "WARNING: IOKit returned success but no assertion table. IOPMLib.h does not "
         + "document this as meaning \"no assertions\", so this scan is INCOMPLETE.")
+  }
+  if snapshot.hasImplausiblyEmptyTable {
+    uncertain = true
+    print(
+      "WARNING: IOKit returned an assertion table with no entries. A running Mac always "
+        + "holds at least one process assertion, so this indicates a failed or restricted "
+        + "read, not an idle system. This scan is INCOMPLETE.")
   }
   if snapshot.malformedRecordCount > 0 {
     uncertain = true

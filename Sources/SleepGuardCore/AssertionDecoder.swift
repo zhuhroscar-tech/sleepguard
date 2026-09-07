@@ -12,7 +12,20 @@ public struct DecodedAssertions: Sendable {
   /// empty result, not a clean one.
   public let sourceTableWasNull: Bool
 
-  public var isComplete: Bool { malformedRecordCount == 0 && !sourceTableWasNull }
+  /// True when the table decoded without error but yielded no assertion at all.
+  ///
+  /// A running macOS system always holds at least one process assertion (the
+  /// window server tickles `UserIsActive`, `powerd` holds bookkeeping
+  /// assertions). A zero-observation table therefore indicates a broken or
+  /// permission-denied read path, not an idle Mac, so it is treated as
+  /// unproven rather than clean.
+  public var hasImplausiblyEmptyTable: Bool {
+    observations.isEmpty && malformedRecordCount == 0 && !sourceTableWasNull
+  }
+
+  public var isComplete: Bool {
+    malformedRecordCount == 0 && !sourceTableWasNull && !hasImplausiblyEmptyTable
+  }
 
   public init(
     observations: [AssertionObservation],
