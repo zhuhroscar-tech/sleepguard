@@ -6,6 +6,11 @@ import SleepGuardCore
 /// Non-goals (enforced by design): never kills, signals, force-quits, elevates,
 /// changes power settings, or sends anything over the network.
 
+func formatHeld(_ seconds: Int?) -> String {
+  guard let seconds else { return "unknown" }
+  return "\(seconds / 3600)h \((seconds % 3600) / 60)m"
+}
+
 let reader = IOKitAssertionReader()
 
 do {
@@ -18,45 +23,68 @@ do {
   print("scanned: \(ISO8601DateFormatter().string(from: Date()))")
   print("")
 
-  if sleepDisabled {
+  // Uncertainty is reported BEFORE any findings, so a reader who stops at the
+  // top of the output never sees a clean claim without its retraction.
+  var uncertain = false
+
+  if !snapshot.isComplete {
+    uncertain = true
+    print(
+      "WARNING: \(snapshot.malformedRecordCount) assertion record(s) could not be decoded. "
+        + "This scan is INCOMPLETE.")
+  }
+  if sleepDisabled == nil {
+    uncertain = true
+    print("WARNING: could not read the standing SleepDisabled setting. This scan is INCOMPLETE.")
+  }
+  if !diagnosis.unclassifiedAssertions.isEmpty {
+    uncertain = true
+    print(
+      "WARNING: \(diagnosis.unclassifiedAssertions.count) assertion(s) have a type this build "
+        + "does not recognize; their effect on sleep is unknown:")
+    for observation in diagnosis.unclassifiedAssertions {
+      print("  ? \(observation.processName) (pid \(observation.pid)) — \(observation.rawType)")
+    }
+  }
+  if uncertain {
+    print("An incomplete scan is NOT proof that nothing is blocking sleep.")
+    print("")
+  }
+
+  if sleepDisabled == true {
     print("SleepDisabled = 1 (standing system setting, not an assertion).")
     print("  This is set by `pmset -a disablesleep 1`; it survives process exit.")
     print("")
   }
 
   if diagnosis.systemSleepBlockers.isEmpty {
-    print("No process is holding a system-sleep assertion.")
+    if diagnosis.canProveSleepIsUnblocked {
+      print("No process-held assertion is blocking idle sleep.")
+    } else {
+      print("No *recognized* sleep-blocking assertion was found, but see the warnings above.")
+    }
   } else {
-    print("System sleep is blocked by \(diagnosis.systemSleepBlockers.count) assertion(s):")
-    for blocker in diagnosis.systemSleepBlockers.sorted(by: { $0.heldSeconds > $1.heldSeconds }) {
-      let hours = blocker.heldSeconds / 3600
-      let minutes = (blocker.heldSeconds % 3600) / 60
+    print("Idle sleep is blocked by \(diagnosis.systemSleepBlockers.count) assertion(s):")
+    let sorted = diagnosis.systemSleepBlockers.sorted {
+      ($0.heldSeconds ?? -1) > ($1.heldSeconds ?? -1)
+    }
+    for blocker in sorted {
       print("  • \(blocker.processName) (pid \(blocker.pid))")
       print("      type: \(blocker.rawType)")
       print("      name: \(blocker.humanName.isEmpty ? "(unnamed)" : blocker.humanName)")
-      print("      held: \(hours)h \(minutes)m")
+      print("      held: \(formatHeld(blocker.heldSeconds))")
     }
     print("")
     print("Quitting the owning app releases its assertion; sleepguard will not do it for you.")
   }
 
-  let displayOnly = snapshot.observations.filter { $0.rawType == "PreventUserIdleDisplaySleep" }
-  if !displayOnly.isEmpty {
-    print("")
-    print("Display-only blockers (system may still sleep): \(displayOnly.count)")
-    for observation in displayOnly {
-      print("  • \(observation.processName) (pid \(observation.pid)) — \(observation.humanName)")
-    }
-  }
+  print("")
+  print(
+    "Scope: this reads process-held assertions (IOPMCopyAssertionsByProcess) only. "
+      + "Kernel-level preventers (USB, IODisplayWrangler) and scheduled dark wakes "
+      + "are NOT covered; see `pmset -g assertions` for those.")
 
-  if !snapshot.isComplete {
-    print("")
-    print(
-      "WARNING: \(snapshot.malformedRecordCount) assertion record(s) could not be decoded; "
-        + "this scan is INCOMPLETE and must not be read as proof that nothing blocks sleep.")
-    exit(2)
-  }
-  exit(0)
+  exit(uncertain ? 2 : 0)
 } catch {
   FileHandle.standardError.write(Data("sleepguard: \(error)\n".utf8))
   exit(1)

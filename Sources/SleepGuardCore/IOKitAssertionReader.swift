@@ -25,9 +25,21 @@ public struct IOKitAssertionReader {
     var unmanaged: Unmanaged<CFDictionary>?
     let status = IOPMCopyAssertionsByProcess(&unmanaged)
     guard status == kIOReturnSuccess else { throw AssertionReadError.ioKitFailure(status) }
-    guard let raw = unmanaged?.takeRetainedValue() as? [AnyHashable: Any] else {
-      // No assertions at all is a legitimate empty snapshot.
+
+    guard let table = unmanaged?.takeRetainedValue() else {
+      // A NULL table is IOKit's documented representation of "no assertions".
       return DecodedAssertions(observations: [], malformedRecordCount: 0)
+    }
+    return try Self.decodeSnapshot(rawTable: table, now: now)
+  }
+
+  /// Pure, testable decoding of an already-retrieved IOKit payload.
+  ///
+  /// A payload that is not the documented `[pid: [record]]` shape throws
+  /// `unexpectedShape`; it must never degrade into an empty "clean" snapshot.
+  public static func decodeSnapshot(rawTable: Any, now: Date) throws -> DecodedAssertions {
+    guard let raw = rawTable as? [AnyHashable: Any] else {
+      throw AssertionReadError.unexpectedShape
     }
 
     var normalized: [Int32: [[String: Any]]] = [:]
@@ -51,18 +63,21 @@ public struct IOKitAssertionReader {
   }
 
   /// Reads the standing `SleepDisabled` system setting, which is not an assertion.
-  public func sleepDisabledSetting() -> Bool {
+  ///
+  /// Returns `nil` when the value could not be read at all, so a failed lookup
+  /// is never reported as "sleep is not disabled".
+  public func sleepDisabledSetting() -> Bool? {
     let root = IOServiceGetMatchingService(
       kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
-    guard root != 0 else { return false }
+    guard root != 0 else { return nil }
     defer { IOObjectRelease(root) }
     guard
       let value = IORegistryEntryCreateCFProperty(
         root, "SleepDisabled" as CFString, kCFAllocatorDefault, 0
       )?.takeRetainedValue()
-    else { return false }
+    else { return nil }
     if let boolean = value as? Bool { return boolean }
     if let number = value as? NSNumber { return number.boolValue }
-    return false
+    return nil
   }
 }

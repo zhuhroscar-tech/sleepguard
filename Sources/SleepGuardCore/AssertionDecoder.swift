@@ -45,7 +45,7 @@ public enum AssertionDecoder {
 
         let humanName = nonBlankString(record[nameKey]) ?? ""
         let processName = nonBlankString(record[processNameKey]) ?? "pid \(pid)"
-        var heldSeconds = 0
+        var heldSeconds: Int?
         if let start = record[startKey] as? Date {
           heldSeconds = max(0, Int(now.timeIntervalSince(start)))
         }
@@ -74,7 +74,11 @@ public enum AssertionDecoder {
 
   private static func unsignedInteger(_ value: Any?) -> UInt64? {
     if let number = value as? UInt64 { return number }
-    if let number = value as? NSNumber { return number.uint64Value }
+    if let number = value as? NSNumber {
+      // Reject negatives rather than wrapping them into a huge UInt64.
+      guard number.int64Value >= 0 else { return nil }
+      return number.uint64Value
+    }
     return nil
   }
 }

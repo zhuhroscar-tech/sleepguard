@@ -31,8 +31,25 @@ Verified locally on macOS 15.7.4 (24G517): a single Electron app held a
 - Never reads user documents; it reads only IOKit power-management state.
 - An assertion snapshot is treated as an *observation*, not a live handle: PIDs
   can exit and be reused, so nothing is ever acted upon.
-- A record it cannot decode marks the scan **incomplete** and exits `2` rather
-  than reporting a clean result. Absence of evidence is not evidence of absence.
+- Anything it cannot decode, cannot classify, or cannot read marks the scan
+  **incomplete** (exit `2`) rather than reporting a clean result. Absence of
+  evidence is not evidence of absence. This covers three distinct cases: an
+  undecodable assertion record, an assertion type this build does not recognize,
+  and a failed `SleepDisabled` lookup.
+
+## Known scope limits
+
+- Only **process-held** assertions are enumerated
+  (`IOPMCopyAssertionsByProcess`). Kernel-level preventers — the
+  `Kernel Assertions` and `Idle sleep preventers: IODisplayWrangler` lines in
+  `pmset -g assertions` — are structurally invisible to this tool.
+- Scheduled dark wakes and Power Nap are not covered.
+- A clean `sleepguard` report therefore means "no process-held assertion is
+  blocking idle sleep", not "nothing can keep this Mac awake".
+
+`PreventUserIdleDisplaySleep` is classified as an idle-sleep blocker on the
+authority of `IOPMLib.h`: *"While the display is prevented from dimming, the
+system cannot go into idle sleep."*
 
 ## Build and run
 
@@ -53,10 +70,12 @@ executable that exits non-zero on any failed assertion:
 swift run sleepguard-tests
 ```
 
-Coverage: assertion-type classification, decoding of the
-`IOPMCopyAssertionsByProcess` dictionary shape, malformed-record handling
-(evidence preserved, completeness flagged), and a real live-IOKit integration
-check against the running system.
+Coverage: assertion-type classification (blocking, known-non-blocking, and
+unknown types), decoding of the `IOPMCopyAssertionsByProcess` dictionary shape,
+malformed-record handling (evidence preserved, completeness flagged), negative
+identifier rejection, unknown-duration handling, the tri-state `SleepDisabled`
+lookup, the unexpected-shape throw path, and two real live-IOKit integration
+checks against the running system.
 
 ## APIs used
 
