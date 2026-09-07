@@ -87,10 +87,10 @@ func testAnEmptyButWellFormedTableIsNotAProvenCleanScan() {
 
   let diagnosis = SleepDiagnosis(snapshot: empty, sleepDisabledSetting: false)
   Harness.expect(
-    !diagnosis.canProveSleepIsUnblocked,
+    !diagnosis.canProveSleepIsUnblocked(aggregate: cleanAggregate),
     "an empty table must not yield a provably-clean verdict")
   Harness.expect(
-    diagnosis.systemSleepIsBlocked == nil,
+    diagnosis.systemSleepIsBlocked(aggregate: cleanAggregate) == nil,
     "an empty table yields an unknown verdict, not a clean false")
 
   // A table that decoded at least one real assertion is not implausibly empty.
@@ -115,10 +115,10 @@ func testALibraryConsumerCannotGetACleanVerdictFromAnIncompleteSnapshot() {
 
   let diagnosis = SleepDiagnosis(snapshot: incomplete, sleepDisabledSetting: false)
   Harness.expect(
-    !diagnosis.canProveSleepIsUnblocked,
+    !diagnosis.canProveSleepIsUnblocked(aggregate: cleanAggregate),
     "undecodable records must never produce a provably-clean verdict")
   Harness.expect(
-    diagnosis.systemSleepIsBlocked == nil,
+    diagnosis.systemSleepIsBlocked(aggregate: cleanAggregate) == nil,
     "an incomplete snapshot yields unknown, not not-blocked")
 
   // A confirmed blocker stays decisive on an incomplete scan: finding more
@@ -132,15 +132,287 @@ func testALibraryConsumerCannotGetACleanVerdictFromAnIncompleteSnapshot() {
     sleepDisabledSetting: false,
     sourceWasComplete: false)
   Harness.expect(
-    blockerOnIncompleteScan.systemSleepIsBlocked == true,
+    blockerOnIncompleteScan.systemSleepIsBlocked(aggregate: cleanAggregate) == true,
     "a confirmed blocker is decisive even on an incomplete scan")
 
   // The NULL-table path must reach the same conclusion through the library type.
   let nullTable = DecodedAssertions(
     observations: [], malformedRecordCount: 0, sourceTableWasNull: true)
   Harness.expect(
-    !SleepDiagnosis(snapshot: nullTable, sleepDisabledSetting: false).canProveSleepIsUnblocked,
+    !SleepDiagnosis(snapshot: nullTable, sleepDisabledSetting: false).canProveSleepIsUnblocked(
+      aggregate: cleanAggregate),
     "a NULL table must not produce a clean verdict through the library type")
+}
+
+// A clean aggregate table with nothing asserted, for tests that only exercise
+// the process-held side. Named so no test silently proves "unblocked" without
+// stating which aggregate view it assumed.
+let cleanAggregate = AggregateAssertionStatus.decode(rawTable: [
+  "PreventUserIdleSystemSleep": NSNumber(value: 0),
+  "PreventSystemSleep": NSNumber(value: 0),
+  "PreventUserIdleDisplaySleep": NSNumber(value: 0),
+  "NetworkClientActive": NSNumber(value: 0),
+  "PreventDiskIdle": NSNumber(value: 0),
+])
+
+func testAggregateTableDecodesLevelsAndFailsClosedOnMalformedEntries() {
+  let decoded = AggregateAssertionStatus.decode(rawTable: [
+    "PreventUserIdleSystemSleep": NSNumber(value: 1),
+    "PreventDiskIdle": NSNumber(value: 0),
+    "UserIsActive": NSNumber(value: 1),
+  ])
+  Harness.equal(decoded.levels["PreventUserIdleSystemSleep"], 1, "asserted level decodes")
+  Harness.equal(decoded.levels["PreventDiskIdle"], 0, "zero level decodes")
+  Harness.expect(decoded.isComplete, "well-formed aggregate table is complete")
+  Harness.equal(
+    decoded.activeBlockingTypes, ["PreventUserIdleSystemSleep"],
+    "only asserted blocking types are active")
+
+  // A NULL table is not a proven-empty result.
+  let nullTable = AggregateAssertionStatus.decode(rawTable: nil)
+  Harness.expect(nullTable.sourceTableWasNull, "nil raw table is flagged")
+  Harness.expect(!nullTable.isComplete, "a NULL aggregate table is not complete")
+
+  // An empty table is a failed read: macOS publishes a fixed set of keys.
+  let empty = AggregateAssertionStatus.decode(rawTable: [AnyHashable: Any]())
+  Harness.expect(empty.hasImplausiblyEmptyTable, "an empty aggregate table is implausible")
+  Harness.expect(!empty.isComplete, "an empty aggregate table is not complete")
+
+  // A non-dictionary payload is malformed, not empty.
+  let wrongShape = AggregateAssertionStatus.decode(rawTable: "not a dictionary")
+  Harness.equal(wrongShape.malformedEntryCount, 1, "uncastable payload counted malformed")
+  Harness.expect(!wrongShape.isComplete, "uncastable payload is not complete")
+
+  // Malformed entries are counted, valid siblings survive, completeness fails.
+  let mixed = AggregateAssertionStatus.decode(rawTable: [
+    "PreventSystemSleep": NSNumber(value: 1),
+    "": NSNumber(value: 1),
+    "BlankValue": "not a number",
+    NSNumber(value: 7): NSNumber(value: 1),
+  ])
+  Harness.equal(mixed.levels["PreventSystemSleep"], 1, "valid entry survives")
+  Harness.equal(mixed.malformedEntryCount, 3, "blank key, bad value and non-string key counted")
+  Harness.expect(!mixed.isComplete, "malformed aggregate entries mark it incomplete")
+
+  // A CFBoolean must not silently bridge to a 0/1 level.
+  let boolean = AggregateAssertionStatus.decode(rawTable: ["PreventSystemSleep": true])
+  Harness.equal(boolean.malformedEntryCount, 1, "a Boolean is not an assertion level")
+  Harness.expect(boolean.levels.isEmpty, "Boolean entry is not recorded as a level")
+}
+
+func testAggregateTableRevealsBlockersNoProcessAssertionAccountsFor() {
+  // The blind spot this closes: the aggregate table says idle sleep is being
+  // prevented, but no process-held record explains it (a kernel-held assertion,
+  // or a process record that could not be read). It names the type, not an owner.
+  let aggregate = AggregateAssertionStatus.decode(rawTable: [
+    "PreventUserIdleSystemSleep": NSNumber(value: 1),
+    "PreventDiskIdle": NSNumber(value: 0),
+  ])
+  let noProcessEvidence = SleepDiagnosis(
+    observations: [], sleepDisabledSetting: false, sourceWasComplete: true)
+
+  Harness.equal(
+    noProcessEvidence.unattributedBlockingTypes(aggregate: aggregate),
+    ["PreventUserIdleSystemSleep"],
+    "an aggregate blocker with no process record is unattributed")
+
+  // Once a process-held assertion of that type is observed, it is attributed
+  // and must no longer be reported as an unexplained blocker.
+  let attributed = SleepDiagnosis(
+    observations: [
+      AssertionObservation(
+        assertionID: 1, pid: 42, processName: "Video", rawType: "PreventUserIdleSystemSleep",
+        humanName: "", heldSeconds: 5)
+    ],
+    sleepDisabledSetting: false, sourceWasComplete: true)
+  Harness.equal(
+    attributed.unattributedBlockingTypes(aggregate: aggregate), [],
+    "an observed process assertion accounts for its aggregate type")
+
+  // NoIdleSleepAssertion is the deprecated alias of PreventUserIdleSystemSleep,
+  // and the aggregate table reports only the modern name. The alias must count
+  // as accounting for it, or every Electron app produces a false blind-spot alarm.
+  let aliasHolder = SleepDiagnosis(
+    observations: [
+      AssertionObservation(
+        assertionID: 2, pid: 1437, processName: "ChatGPT", rawType: "NoIdleSleepAssertion",
+        humanName: "Electron", heldSeconds: 99)
+    ],
+    sleepDisabledSetting: false, sourceWasComplete: true)
+  Harness.equal(
+    aliasHolder.unattributedBlockingTypes(aggregate: aggregate), [],
+    "NoIdleSleepAssertion accounts for the PreventUserIdleSystemSleep aggregate level")
+
+  // Multiple unattributed types are reported in sorted order.
+  let twoBlockers = AggregateAssertionStatus.decode(rawTable: [
+    "PreventUserIdleDisplaySleep": NSNumber(value: 1),
+    "NetworkClientActive": NSNumber(value: 2),
+  ])
+  Harness.equal(
+    noProcessEvidence.unattributedBlockingTypes(aggregate: twoBlockers),
+    ["NetworkClientActive", "PreventUserIdleDisplaySleep"],
+    "multiple unattributed types are sorted")
+
+  // An unrecognized aggregate type that is asserted must be surfaced as
+  // unclassified, never assumed harmless.
+  let unknownType = AggregateAssertionStatus.decode(rawTable: [
+    "SomeFutureAggregateType": NSNumber(value: 1),
+    "UserIsActive": NSNumber(value: 1),
+    "PreventDiskIdle": NSNumber(value: 1),
+    "InactiveFutureType": NSNumber(value: 0),
+  ])
+  Harness.equal(
+    noProcessEvidence.unclassifiedAggregateTypes(aggregate: unknownType),
+    ["SomeFutureAggregateType", "UserIsActive"],
+    "asserted unrecognized aggregate types are unclassified; inactive ones are not")
+  Harness.equal(
+    noProcessEvidence.unattributedBlockingTypes(aggregate: unknownType), [],
+    "an unclassified type is not reported as a known blocker")
+
+  // Regression: proving "unblocked" must require the aggregate view. A process
+  // scan that is clean on its own must NOT yield a clean verdict when the
+  // aggregate table reports an unattributed blocker or is itself incomplete.
+  Harness.expect(
+    !noProcessEvidence.canProveSleepIsUnblocked(aggregate: aggregate),
+    "an unattributed aggregate blocker must defeat the clean proof")
+  Harness.expect(
+    !noProcessEvidence.canProveSleepIsUnblocked(
+      aggregate: AggregateAssertionStatus.decode(rawTable: nil)),
+    "an unreadable aggregate table must defeat the clean proof")
+  Harness.expect(
+    !noProcessEvidence.canProveSleepIsUnblocked(aggregate: unknownType),
+    "an unclassified active aggregate type must defeat the clean proof")
+  Harness.expect(
+    noProcessEvidence.canProveSleepIsUnblocked(aggregate: cleanAggregate),
+    "a complete process scan plus a complete quiet aggregate table is provably clean")
+
+  // A negative level is nonsensical for a count and must be malformed, not
+  // silently read as "not asserted".
+  let negative = AggregateAssertionStatus.decode(rawTable: [
+    "PreventSystemSleep": NSNumber(value: -1)
+  ])
+  Harness.equal(negative.malformedEntryCount, 1, "a negative level is malformed")
+  Harness.expect(negative.levels.isEmpty, "negative level is not recorded")
+  Harness.expect(!negative.isComplete, "a negative level marks the table incomplete")
+}
+
+func testASecondHolderOfAnAlreadyObservedTypeIsNotMaskedByPresenceAlone() {
+  // Regression: comparing SET PRESENCE let one observed holder of type T grant
+  // blanket amnesty to every other holder of T. The aggregate level must be
+  // compared against the NUMBER of observed holders, not merely whether any
+  // exists, or a second unattributed holder is silently masked.
+  let twoHolders = AggregateAssertionStatus.decode(rawTable: [
+    "PreventUserIdleDisplaySleep": NSNumber(value: 2)
+  ])
+  let oneObserved = SleepDiagnosis(
+    observations: [
+      AssertionObservation(
+        assertionID: 1, pid: 5899, processName: "UniversalControl",
+        rawType: "PreventUserIdleDisplaySleep", humanName: "", heldSeconds: 10)
+    ],
+    sleepDisabledSetting: false, sourceWasComplete: true)
+
+  Harness.equal(
+    oneObserved.unattributedBlockingTypes(aggregate: twoHolders),
+    ["PreventUserIdleDisplaySleep"],
+    "level 2 with one observed holder leaves one holder unattributed")
+  Harness.expect(
+    !oneObserved.canProveSleepIsUnblocked(aggregate: twoHolders),
+    "a masked second holder must defeat the clean proof")
+  Harness.expect(
+    oneObserved.systemSleepIsBlocked(aggregate: twoHolders) == true,
+    "the observed holder is itself a confirmed blocker")
+
+  // With both holders observed, the level is fully accounted for.
+  let twoObserved = SleepDiagnosis(
+    observations: [
+      AssertionObservation(
+        assertionID: 1, pid: 5899, processName: "UniversalControl",
+        rawType: "PreventUserIdleDisplaySleep", humanName: "", heldSeconds: 10),
+      AssertionObservation(
+        assertionID: 2, pid: 700, processName: "Video",
+        rawType: "PreventUserIdleDisplaySleep", humanName: "", heldSeconds: 3),
+    ],
+    sleepDisabledSetting: false, sourceWasComplete: true)
+  Harness.equal(
+    twoObserved.unattributedBlockingTypes(aggregate: twoHolders), [],
+    "two observed holders account for level 2")
+}
+
+func testAlwaysPresentBaselineAggregateTypesAreNotedButDoNotForceUncertainty() {
+  // Regression: UserIsActive and EnableIdleSleep are asserted on every
+  // interactive Mac and have no IOPMLib.h citation. Treating them as reasons
+  // sleep might be blocked made exit 0 unreachable, destroying the exit code's
+  // information content. They are noted, never certified harmless, and never
+  // counted as blockers or uncertainty.
+  let realWorldTable = AggregateAssertionStatus.decode(rawTable: [
+    "UserIsActive": NSNumber(value: 1),
+    "EnableIdleSleep": NSNumber(value: 1),
+    "PreventUserIdleSystemSleep": NSNumber(value: 0),
+    "PreventUserIdleDisplaySleep": NSNumber(value: 0),
+    "PreventSystemSleep": NSNumber(value: 0),
+    "NetworkClientActive": NSNumber(value: 0),
+    "PreventDiskIdle": NSNumber(value: 0),
+  ])
+  let quiet = SleepDiagnosis(
+    observations: [], sleepDisabledSetting: false, sourceWasComplete: true)
+
+  Harness.equal(
+    quiet.baselineActiveAggregateTypes(aggregate: realWorldTable),
+    ["EnableIdleSleep", "UserIsActive"],
+    "the always-present pair is reported as baseline")
+  Harness.equal(
+    quiet.novelUnclassifiedAggregateTypes(aggregate: realWorldTable), [],
+    "the baseline pair is not novel")
+  Harness.expect(
+    quiet.canProveSleepIsUnblocked(aggregate: realWorldTable),
+    "a real-world quiet Mac must be able to reach a provably-clean verdict")
+  Harness.expect(
+    quiet.systemSleepIsBlocked(aggregate: realWorldTable) == false,
+    "a real-world quiet Mac is not blocked")
+
+  // A genuinely novel asserted type is still hard uncertainty.
+  let novel = AggregateAssertionStatus.decode(rawTable: [
+    "UserIsActive": NSNumber(value: 1),
+    "SomeFutureAggregateType": NSNumber(value: 1),
+    "PreventDiskIdle": NSNumber(value: 0),
+  ])
+  Harness.equal(
+    quiet.novelUnclassifiedAggregateTypes(aggregate: novel), ["SomeFutureAggregateType"],
+    "an unrecognized non-baseline type is novel")
+  Harness.expect(
+    !quiet.canProveSleepIsUnblocked(aggregate: novel),
+    "a novel unclassified active type defeats the clean proof")
+  Harness.expect(
+    quiet.systemSleepIsBlocked(aggregate: novel) == nil,
+    "a novel unclassified active type yields unknown")
+
+  // Regression: the baseline allowlist must not certify a plausible blocker as
+  // harmless. InternalPreventSleep and friends measured level 0 on a real host,
+  // so allowlisting them bought no noise reduction while letting an active one
+  // produce a provably-clean verdict on an unsourced guess.
+  for suspicious in [
+    "InternalPreventSleep", "InternalPreventDisplaySleep", "SystemIsActive", "DisplayWake",
+  ] {
+    Harness.expect(
+      !SleepDiagnosis.baselineUnclassifiedAggregateTypes.contains(suspicious),
+      "\(suspicious) must not be baselined: no header citation and its name suggests blocking")
+
+    let table = AggregateAssertionStatus.decode(rawTable: [
+      suspicious: NSNumber(value: 1),
+      "UserIsActive": NSNumber(value: 1),
+      "PreventDiskIdle": NSNumber(value: 0),
+    ])
+    Harness.equal(
+      quiet.novelUnclassifiedAggregateTypes(aggregate: table), [suspicious],
+      "an active \(suspicious) is novel, not baseline")
+    Harness.expect(
+      !quiet.canProveSleepIsUnblocked(aggregate: table),
+      "an active \(suspicious) must never yield a provably-clean verdict")
+    Harness.expect(
+      quiet.systemSleepIsBlocked(aggregate: table) == nil,
+      "an active \(suspicious) must yield unknown, not not-blocked")
+  }
 }
 
 func testNoIdleSleepAssertionIsReportedAsASystemSleepBlocker() {
@@ -157,7 +429,8 @@ func testNoIdleSleepAssertionIsReportedAsASystemSleepBlocker() {
     observations: [observation], sleepDisabledSetting: false, sourceWasComplete: true)
 
   Harness.expect(
-    diagnosis.systemSleepIsBlocked == true, "NoIdleSleepAssertion must block system sleep")
+    diagnosis.systemSleepIsBlocked(aggregate: cleanAggregate) == true,
+    "NoIdleSleepAssertion must block system sleep")
   Harness.equal(
     diagnosis.systemSleepBlockers.map(\.processName), ["ChatGPT"], "blocker process name")
 }
@@ -219,7 +492,9 @@ func testOnlyHeaderCitedNonBlockingTypesAreCertifiedHarmless() {
     observations: [disk], sleepDisabledSetting: false, sourceWasComplete: true)
   Harness.equal(diskDiagnosis.systemSleepBlockers.count, 0, "PreventDiskIdle does not block")
   Harness.equal(diskDiagnosis.unclassifiedAssertions.count, 0, "PreventDiskIdle is a known type")
-  Harness.expect(diskDiagnosis.canProveSleepIsUnblocked, "disk-only state is provably clean")
+  Harness.expect(
+    diskDiagnosis.canProveSleepIsUnblocked(aggregate: cleanAggregate),
+    "disk-only state is provably clean")
 
   // IOPMLib.h, kIOPMAssertNetworkClientActive: "Keeps the system awake while OS X
   // serves active network clients... this assertion can prevent system from going
@@ -230,7 +505,9 @@ func testOnlyHeaderCitedNonBlockingTypesAreCertifiedHarmless() {
   let networkDiagnosis = SleepDiagnosis(
     observations: [network], sleepDisabledSetting: false, sourceWasComplete: true)
   Harness.equal(networkDiagnosis.systemSleepBlockers.count, 1, "NetworkClientActive blocks sleep")
-  Harness.expect(!networkDiagnosis.canProveSleepIsUnblocked, "network assertion is not clean")
+  Harness.expect(
+    !networkDiagnosis.canProveSleepIsUnblocked(aggregate: cleanAggregate),
+    "network assertion is not clean")
 
   // Types with no citable authority must be unclassified, never enumerated harmless.
   for unsourced in ["UserIsActive", "BackgroundTask", "DenySystemSleep", "EnableIdleSleep"] {
@@ -241,7 +518,8 @@ func testOnlyHeaderCitedNonBlockingTypesAreCertifiedHarmless() {
     Harness.equal(
       diagnosis.unclassifiedAssertions.count, 1, "\(unsourced) has no cited authority")
     Harness.expect(
-      !diagnosis.canProveSleepIsUnblocked, "\(unsourced) must not yield a clean result")
+      !diagnosis.canProveSleepIsUnblocked(aggregate: cleanAggregate),
+      "\(unsourced) must not yield a clean result")
   }
 }
 
@@ -257,7 +535,8 @@ func testNullIOKitTableIsNotTreatedAsAProvenEmptyScan() {
 func testSystemSleepIsBlockedIsTriStateWhenTheStandingSettingIsUnknown() {
   let unknown = SleepDiagnosis(observations: [], sleepDisabledSetting: nil, sourceWasComplete: true)
   Harness.expect(
-    unknown.systemSleepIsBlocked == nil, "unknown SleepDisabled yields an unknown verdict")
+    unknown.systemSleepIsBlocked(aggregate: cleanAggregate) == nil,
+    "unknown SleepDisabled yields an unknown verdict")
 
   let blocked = SleepDiagnosis(
     observations: [
@@ -267,11 +546,13 @@ func testSystemSleepIsBlockedIsTriStateWhenTheStandingSettingIsUnknown() {
     ],
     sleepDisabledSetting: nil, sourceWasComplete: true)
   Harness.expect(
-    blocked.systemSleepIsBlocked == true,
+    blocked.systemSleepIsBlocked(aggregate: cleanAggregate) == true,
     "a confirmed blocker is decisive even when the standing setting is unknown")
 
   let clean = SleepDiagnosis(observations: [], sleepDisabledSetting: false, sourceWasComplete: true)
-  Harness.expect(clean.systemSleepIsBlocked == false, "fully known empty state is unblocked")
+  Harness.expect(
+    clean.systemSleepIsBlocked(aggregate: cleanAggregate) == false,
+    "fully known empty state is unblocked")
 }
 
 func testDisplaySleepAssertionAlsoBlocksSystemIdleSleep() {
@@ -285,7 +566,8 @@ func testDisplaySleepAssertionAlsoBlocksSystemIdleSleep() {
     observations: [observation], sleepDisabledSetting: false, sourceWasComplete: true)
 
   Harness.expect(
-    diagnosis.systemSleepIsBlocked == true, "display assertion blocks system idle sleep")
+    diagnosis.systemSleepIsBlocked(aggregate: cleanAggregate) == true,
+    "display assertion blocks system idle sleep")
   Harness.equal(diagnosis.systemSleepBlockers.count, 1, "display assertion is a blocker")
   Harness.equal(diagnosis.unclassifiedAssertions.count, 0, "known type is not unclassified")
 }
@@ -301,7 +583,8 @@ func testKnownNonBlockingAssertionTypesAreNotReportedAsBlockers() {
     observations: [observation], sleepDisabledSetting: false, sourceWasComplete: true)
 
   Harness.equal(diagnosis.systemSleepBlockers.count, 0, "no idle-sleep blockers")
-  Harness.expect(diagnosis.systemSleepIsBlocked == false, "sleep is not blocked")
+  Harness.expect(
+    diagnosis.systemSleepIsBlocked(aggregate: cleanAggregate) == false, "sleep is not blocked")
 }
 
 func testUnknownAssertionTypeIsUnclassifiedAndMakesTheAnswerUncertain() {
@@ -314,21 +597,26 @@ func testUnknownAssertionTypeIsUnclassifiedAndMakesTheAnswerUncertain() {
 
   Harness.equal(diagnosis.unclassifiedAssertions.count, 1, "unknown type is unclassified")
   Harness.expect(
-    !diagnosis.canProveSleepIsUnblocked,
+    !diagnosis.canProveSleepIsUnblocked(aggregate: cleanAggregate),
     "an unknown assertion type must not yield a confident clean result")
 }
 
 func testSleepDisabledSettingIsTriStateSoAFailedLookupIsNotReportedAsFalse() {
   let unknown = SleepDiagnosis(observations: [], sleepDisabledSetting: nil, sourceWasComplete: true)
   Harness.expect(
-    !unknown.canProveSleepIsUnblocked, "unknown SleepDisabled must not yield a clean result")
+    !unknown.canProveSleepIsUnblocked(aggregate: cleanAggregate),
+    "unknown SleepDisabled must not yield a clean result")
 
   let known = SleepDiagnosis(observations: [], sleepDisabledSetting: false, sourceWasComplete: true)
-  Harness.expect(known.canProveSleepIsUnblocked, "fully known empty state is provably clean")
+  Harness.expect(
+    known.canProveSleepIsUnblocked(aggregate: cleanAggregate),
+    "fully known empty state is provably clean")
 
   let disabled = SleepDiagnosis(
     observations: [], sleepDisabledSetting: true, sourceWasComplete: true)
-  Harness.expect(disabled.systemSleepIsBlocked == true, "SleepDisabled=1 blocks sleep")
+  Harness.expect(
+    disabled.systemSleepIsBlocked(aggregate: cleanAggregate) == true, "SleepDisabled=1 blocks sleep"
+  )
 }
 
 func testMissingStartTimestampYieldsUnknownDurationRatherThanZero() {
@@ -410,6 +698,43 @@ func testLiveIOKitSnapshotIsReadableAndSelfConsistent() {
   }
 }
 
+func testLiveAggregateAssertionTableIsReadableAndSelfConsistent() {
+  // Real integration: reads the live system-wide aggregate table. Read-only.
+  let aggregate = IOKitAssertionReader().aggregateStatus()
+
+  Harness.expect(
+    !aggregate.levels.isEmpty,
+    "macOS publishes a fixed set of aggregate assertion keys; empty means a broken read")
+  Harness.expect(aggregate.isComplete, "the live aggregate table must decode completely")
+  Harness.expect(!aggregate.sourceTableWasNull, "live aggregate table must not be NULL")
+  Harness.equal(aggregate.malformedEntryCount, 0, "no malformed live aggregate entries")
+
+  // Every level is a plausible non-negative count.
+  for (name, level) in aggregate.levels {
+    Harness.expect(!name.isEmpty, "aggregate key must be non-empty")
+    Harness.expect(level >= 0, "aggregate level for \(name) must be non-negative")
+  }
+
+  // Cross-check the two IOKit views: any blocking type held by a process this
+  // build observed must also be asserted in the aggregate table. The reverse
+  // need not hold, which is exactly the blind spot this feature reports.
+  guard let snapshot = try? IOKitAssertionReader().snapshot() else {
+    Harness.expect(false, "process-held snapshot must succeed on macOS")
+    return
+  }
+  let diagnosis = SleepDiagnosis(
+    snapshot: snapshot, sleepDisabledSetting: IOKitAssertionReader().sleepDisabledSetting())
+  for blocker in diagnosis.systemSleepBlockers {
+    let canonical =
+      blocker.rawType == "NoIdleSleepAssertion" ? "PreventUserIdleSystemSleep" : blocker.rawType
+    if let level = aggregate.levels[canonical] {
+      Harness.expect(
+        level > 0,
+        "process holds \(blocker.rawType) but aggregate \(canonical) level is \(level)")
+    }
+  }
+}
+
 func testLiveSleepDisabledLookupReturnsAKnownValueOnThisHost() {
   // IOPMrootDomain always publishes SleepDisabled on macOS, so a nil here means
   // the lookup broke rather than that sleep is enabled.
@@ -420,6 +745,10 @@ func testLiveSleepDisabledLookupReturnsAKnownValueOnThisHost() {
 testLiveTestGateOptsInOnlyForAnExplicitTruthyValue()
 testAnEmptyButWellFormedTableIsNotAProvenCleanScan()
 testALibraryConsumerCannotGetACleanVerdictFromAnIncompleteSnapshot()
+testAggregateTableDecodesLevelsAndFailsClosedOnMalformedEntries()
+testAggregateTableRevealsBlockersNoProcessAssertionAccountsFor()
+testASecondHolderOfAnAlreadyObservedTypeIsNotMaskedByPresenceAlone()
+testAlwaysPresentBaselineAggregateTypesAreNotedButDoNotForceUncertainty()
 testNoIdleSleepAssertionIsReportedAsASystemSleepBlocker()
 testDecodingIOKitAssertionsByProcessProducesObservations()
 testMalformedAssertionRecordMarksResultIncompleteWithoutDroppingValidEvidence()
@@ -440,6 +769,7 @@ testOneBadRecordDoesNotDiscardAPIDsValidRecords()
 // product defect that does not exist. Skipping is announced, never silent.
 if LiveTestGate.isEnabled(environment: ProcessInfo.processInfo.environment) {
   testLiveIOKitSnapshotIsReadableAndSelfConsistent()
+  testLiveAggregateAssertionTableIsReadableAndSelfConsistent()
   testLiveSleepDisabledLookupReturnsAKnownValueOnThisHost()
 } else {
   print("SKIP: live IOKit tests (set \(LiveTestGate.variableName)=1 to run them)")

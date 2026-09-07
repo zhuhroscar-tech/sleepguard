@@ -45,13 +45,31 @@ Verified locally on macOS 15.7.4 (24G517): a single Electron app held a
 
 ## Known scope limits
 
-- Only **process-held** assertions are enumerated
-  (`IOPMCopyAssertionsByProcess`). Kernel-level preventers — the
+- **Kernel-level preventers remain structurally invisible.** The
   `Kernel Assertions` and `Idle sleep preventers: IODisplayWrangler` lines in
-  `pmset -g assertions` — are structurally invisible to this tool.
+  `pmset -g assertions` are not exposed by any API this tool uses. Measured on
+  macOS 15.7.4 with three active kernel USB assertions and `IODisplayWrangler`
+  reported as an active idle-sleep preventer, **no key in the aggregate
+  `IOPMCopyAssertionsStatus` table changed.** That table aggregates the same
+  assertion accounting as `IOPMCopyAssertionsByProcess`; IOPMLib.h documents
+  nothing about kernel contribution to its levels, so per this project's
+  citation-only rule no coverage is claimed.
+- **Owners** are named only for **process-held** assertions. The aggregate table
+  is used for one narrower purpose: if a sleep-blocking type is asserted
+  system-wide with no readable process record to account for it, the scan is
+  marked incomplete and the type is reported as **unattributed**. That catches an
+  unreadable record or a holder the by-process enumeration missed — not a kernel
+  assertion. The owner still cannot be named.
+- **Same-type masking is a known limit.** Measured on macOS 15.7.4, an aggregate
+  level behaves as a 0/1 asserted flag rather than a holder count: three
+  simultaneous holders of one type still reported level 1. So if a readable
+  process record accounts for a type, a second *unreadable* holder of that same
+  type cannot be detected through this API.
 - Scheduled dark wakes and Power Nap are not covered.
 - A clean `sleepguard` report therefore means "no process-held assertion is
-  blocking idle sleep", not "nothing can keep this Mac awake".
+  blocking idle sleep, and every aggregate sleep-blocking level is accounted
+  for". It does **not** mean "nothing can keep this Mac awake". For that, read
+  `pmset -g assertions`.
 
 `PreventUserIdleDisplaySleep` is classified as an idle-sleep blocker on the
 authority of `IOPMLib.h`: *"While the display is prevented from dimming, the
@@ -69,16 +87,17 @@ Exit codes, in precedence order:
 | Code | Meaning |
 |---|---|
 | `1` | IOKit read failure — nothing could be determined |
-| `2` | Scan incomplete: something could not be decoded, classified, or read |
-| `3` | Sleep confirmed blocked, and the scan was otherwise complete |
+| `3` | Sleep confirmed blocked (a definitive finding, reported even if other parts of the scan were incomplete) |
+| `2` | Cannot determine: something could not be decoded, classified, or read |
 | `0` | Sleep provably unblocked |
 
-**`2` outranks `3`.** If a confirmed blocker is found *and* anything was
-unreadable, the exit code is `2`, and the blocker is still printed in full. In
-practice `2` is the common case on an interactive Mac, because `WindowServer`
-holds a `UserIsActive` assertion that no IOKit header classifies, and this tool
-refuses to assume an unsourced type is harmless. Read the printed findings, not
-only the status code.
+`3` outranks `2` because a confirmed blocker is decisive — finding *more*
+evidence could never turn a real blocker into a clean result, so incompleteness
+elsewhere does not weaken it. The warnings are still printed above the findings.
+
+`2` always outranks `0`. An unknown verdict is never reported as "provably
+unblocked": that is the tool's core promise. Read the printed findings, not only
+the status code.
 
 ## Classification authority
 
@@ -119,15 +138,19 @@ Coverage: assertion-type classification (blocking, known-non-blocking, and
 unknown types), decoding of the `IOPMCopyAssertionsByProcess` dictionary shape,
 malformed-record handling (evidence preserved, completeness flagged), negative
 identifier rejection, unknown-duration handling, the tri-state `SleepDisabled`
-lookup, the unexpected-shape throw path, and two real live-IOKit integration
-checks against the running system.
+lookup, the unexpected-shape throw path, aggregate-table decoding (malformed keys and
+values, Booleans rejected as levels, NULL and empty tables), unattributed
+aggregate blockers including the deprecated-alias equivalence, and three real
+live-IOKit integration checks against the running system.
 
 ## APIs used
 
 Documented public IOKit power-management API only:
-`IOPMCopyAssertionsByProcess`, `IOServiceGetMatchingService` /
-`IORegistryEntryCreateCFProperty` for `IOPMrootDomain.SleepDisabled`. No private
-APIs, no kernel extensions, no SIP changes.
+`IOPMCopyAssertionsByProcess` (process-held assertions),
+`IOPMCopyAssertionsStatus` (system-wide aggregate levels),
+`IOServiceGetMatchingService` / `IORegistryEntryCreateCFProperty` for
+`IOPMrootDomain.SleepDisabled`. No private APIs, no kernel extensions, no SIP
+changes.
 
 ## License
 

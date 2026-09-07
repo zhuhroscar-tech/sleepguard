@@ -69,6 +69,28 @@ public struct IOKitAssertionReader {
     )
   }
 
+  /// Reads the system-wide aggregate assertion table.
+  ///
+  /// Read-only, like every other method here. This is the documented public way
+  /// to notice that *something* is asserting a sleep-blocking type even when no
+  /// process-held record accounts for it. It carries no owner information and is
+  /// never used to attribute a blocker to a process.
+  ///
+  /// An IOKit failure is reported as a malformed (incomplete) result rather than
+  /// throwing, so a failed aggregate read degrades the confidence of the report
+  /// instead of destroying an otherwise valid process-held scan.
+  public func aggregateStatus() -> AggregateAssertionStatus {
+    var unmanaged: Unmanaged<CFDictionary>?
+    let status = IOPMCopyAssertionsStatus(&unmanaged)
+    guard status == kIOReturnSuccess else {
+      return AggregateAssertionStatus(levels: [:], malformedEntryCount: 1)
+    }
+    guard let table = unmanaged?.takeRetainedValue() else {
+      return AggregateAssertionStatus.decode(rawTable: nil)
+    }
+    return AggregateAssertionStatus.decode(rawTable: table)
+  }
+
   /// Reads the standing `SleepDisabled` system setting, which is not an assertion.
   ///
   /// Returns `nil` when the value could not be read at all, so a failed lookup

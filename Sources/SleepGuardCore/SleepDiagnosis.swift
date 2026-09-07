@@ -52,7 +52,7 @@ public struct SleepDiagnosis: Sendable {
   /// idle sleep." `NetworkClientActive` likewise: "Keeps the system awake while
   /// OS X serves active network clients... On battery, this assertion can
   /// prevent system from going into idle sleep."
-  static let systemSleepBlockingTypes: Set<String> = [
+  public static let systemSleepBlockingTypes: Set<String> = [
     "NoIdleSleepAssertion",
     "PreventUserIdleSystemSleep",
     "PreventSystemSleep",
@@ -108,26 +108,153 @@ public struct SleepDiagnosis: Sendable {
     }
   }
 
-  /// Tri-state verdict. `nil` means "cannot determine": no confirmed blocker was
-  /// found, but something could not be read, so the absence of a blocker is not
-  /// provable. Never collapses unknown into "not blocked".
+  /// Blocking assertion types whose system-wide level exceeds the number of
+  /// readable process records this build observed holding that type.
   ///
-  /// A confirmed blocker is decisive even on an incomplete scan — finding *more*
+  /// A non-empty result means the assertion subsystem reports a sleep-blocking
+  /// type asserted with no readable process record to account for it. It names
+  /// the *type*, never an owner, because the aggregate table carries no owner
+  /// information.
+  ///
+  /// **Measured level semantics, and a known limit.** IOPMLib.h does not
+  /// document what a level counts. On macOS 15.7.4 it behaves as a 0/1 asserted
+  /// flag, not a holder count: with three simultaneous holders of the canonical
+  /// type `PreventUserIdleSystemSleep`, the level stayed at 1. Consequently one
+  /// readable holder of a type does account for the whole level, and a *second*
+  /// unreadable holder of that same type cannot be detected through this API.
+  /// Same-type masking is therefore a known limit, not a solved problem. The
+  /// count comparison below is defensive coding for level semantics Apple does
+  /// not document — if a level ever does carry a count, a surplus is reported;
+  /// under the measured 0/1 behavior it reduces to presence subtraction.
+  ///
+  /// `NoIdleSleepAssertion` is normalized to `PreventUserIdleSystemSleep`:
+  /// IOPMLib.h documents the former as the deprecated alias of the latter, and
+  /// the aggregate table publishes only the modern name.
+  public func unattributedBlockingTypes(
+    aggregate: AggregateAssertionStatus
+  ) -> [String] {
+    var observedHolders: [String: Int] = [:]
+    for observation in observations {
+      observedHolders[Self.canonicalType(observation.rawType), default: 0] += 1
+    }
+    return aggregate.activeBlockingTypes
+      .filter { type in
+        let level = aggregate.levels[type] ?? 0
+        return level > (observedHolders[Self.canonicalType(type)] ?? 0)
+      }
+      .sorted()
+  }
+
+  /// Aggregate assertion types this build cannot classify from an IOPMLib.h
+  /// citation but which were **measured active on an idle interactive Mac**, so
+  /// their mere presence carries no diagnostic signal.
+  ///
+  /// Membership requires a measurement, not a plausible-looking name. On macOS
+  /// 15.7.4 only `UserIsActive` (raised by the window server on every input
+  /// tickle) and `EnableIdleSleep` (a standing state key whose name asserts the
+  /// opposite of blocking) were active on an otherwise idle host. Every other
+  /// published key measured level 0, so excluding them costs nothing in noise
+  /// and keeps real signal if one ever goes active.
+  ///
+  /// Deliberately **not** included: `InternalPreventSleep`,
+  /// `InternalPreventDisplaySleep`, `SystemIsActive` and `DisplayWake`. Their
+  /// names suggest they may prevent sleep, this build has no header citation
+  /// either way, and they measured level 0 — so allowlisting them would buy no
+  /// noise reduction while letting an active one produce a provably-clean
+  /// verdict. That would be certifying a potential blocker as harmless on an
+  /// unsourced guess, which this project forbids.
+  ///
+  /// Baseline members are still never certified harmless: this build has no
+  /// header citation for their sleep semantics, so they are neither counted as
+  /// blockers nor enumerated as safe.
+  public static let baselineUnclassifiedAggregateTypes: Set<String> = [
+    "UserIsActive",
+    "EnableIdleSleep",
+  ]
+
+  /// Active aggregate types with no citable IOPMLib.h classification, split into
+  /// the always-present baseline (informational) and genuinely novel types
+  /// (which make the answer uncertain).
+  public func unclassifiedAggregateTypes(
+    aggregate: AggregateAssertionStatus
+  ) -> [String] {
+    aggregate.levels
+      .filter { entry in
+        entry.value > 0
+          && !Self.systemSleepBlockingTypes.contains(entry.key)
+          && !Self.knownNonBlockingTypes.contains(entry.key)
+      }
+      .keys.sorted()
+  }
+
+  /// Active unclassified aggregate types that are part of the documented
+  /// always-present baseline. Informational only.
+  public func baselineActiveAggregateTypes(
+    aggregate: AggregateAssertionStatus
+  ) -> [String] {
+    unclassifiedAggregateTypes(aggregate: aggregate)
+      .filter { Self.baselineUnclassifiedAggregateTypes.contains($0) }
+  }
+
+  /// Active unclassified aggregate types that are *not* in the baseline set.
+  ///
+  /// This is where the real signal is: an assertion type this build has never
+  /// seen, asserted right now, with unknown sleep semantics. These make the scan
+  /// incomplete.
+  public func novelUnclassifiedAggregateTypes(
+    aggregate: AggregateAssertionStatus
+  ) -> [String] {
+    unclassifiedAggregateTypes(aggregate: aggregate)
+      .filter { !Self.baselineUnclassifiedAggregateTypes.contains($0) }
+  }
+
+  /// Maps the deprecated `NoIdleSleepAssertion` alias onto the modern type name
+  /// documented in IOPMLib.h, so process-held and aggregate views can be
+  /// compared. All other types are returned unchanged.
+  static func canonicalType(_ rawType: String) -> String {
+    rawType == "NoIdleSleepAssertion" ? "PreventUserIdleSystemSleep" : rawType
+  }
+
+  /// Tri-state verdict. `nil` means "cannot determine".
+  ///
+  /// This is a function taking the aggregate view for the same reason
+  /// `canProveSleepIsUnblocked` is: as a property it could return `false` — an
+  /// affirmative clean answer — while the aggregate table reported an
+  /// unattributed blocker or could not be read at all, contradicting its own
+  /// sibling API on the same state. A consumer must not be able to get "not
+  /// blocked" without consulting both views.
+  ///
+  /// A confirmed blocker is decisive even on an incomplete scan: finding more
   /// evidence could never turn a real blocker into a clean result.
-  public var systemSleepIsBlocked: Bool? {
+  public func systemSleepIsBlocked(aggregate: AggregateAssertionStatus) -> Bool? {
     if !systemSleepBlockers.isEmpty { return true }
     if sleepDisabledSetting == true { return true }
     if sleepDisabledSetting == nil { return nil }
     if !sourceWasComplete { return nil }
     if !unclassifiedAssertions.isEmpty { return nil }
+    if !aggregate.isComplete { return nil }
+    if !unattributedBlockingTypes(aggregate: aggregate).isEmpty { return nil }
+    if !novelUnclassifiedAggregateTypes(aggregate: aggregate).isEmpty { return nil }
     return false
   }
 
-  /// True only when a clean result is actually provable: the source snapshot
-  /// decoded completely, no blockers, no unclassified assertions, and the
-  /// standing setting was successfully read.
-  public var canProveSleepIsUnblocked: Bool {
-    sourceWasComplete && sleepDisabledSetting == false && systemSleepBlockers.isEmpty
-      && unclassifiedAssertions.isEmpty
+  /// True only when a clean result is actually provable.
+  ///
+  /// This is a function, not a property, on purpose: proving that nothing is
+  /// blocking sleep requires the system-wide aggregate table as well as the
+  /// process-held one, so the caller cannot obtain a clean verdict without
+  /// supplying it. The previous property form let a library consumer prove
+  /// "unblocked" while never consulting the aggregate view at all, which is the
+  /// blind spot this API exists to close.
+  ///
+  /// Requires: the process snapshot decoded completely, the aggregate table
+  /// decoded completely, the standing setting was read, and there are no
+  /// blockers, no unclassified process assertions, no unattributed aggregate
+  /// blockers and no unclassified active aggregate types.
+  public func canProveSleepIsUnblocked(aggregate: AggregateAssertionStatus) -> Bool {
+    sourceWasComplete && aggregate.isComplete && sleepDisabledSetting == false
+      && systemSleepBlockers.isEmpty && unclassifiedAssertions.isEmpty
+      && unattributedBlockingTypes(aggregate: aggregate).isEmpty
+      && novelUnclassifiedAggregateTypes(aggregate: aggregate).isEmpty
   }
 }
