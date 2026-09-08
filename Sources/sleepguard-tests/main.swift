@@ -1107,12 +1107,75 @@ func testNonIntegralOrOversizedNumbersAreRejectedRatherThanTruncated() {
     fractionalLevel.malformedRecordCount, 1, "a fractional Level is malformed, not floored to 0")
   Harness.expect(!fractionalLevel.isComplete, "a fractional Level makes the view incomplete")
 
+  // Pin the doc comment's SOLE-CATCHER claims, so the comment cannot rot into
+  // a plausible-sounding but false description of the guards. These assert on
+  // NSNumber's measured behavior directly, which is what the comment describes.
+  //
+  // Claim 1: >= 0 is the sole catcher for an in-range negative, because -1
+  // round-trips through doubleValue perfectly.
+  Harness.expect(
+    Double(NSNumber(value: -1).intValue) == NSNumber(value: -1).doubleValue,
+    "-1 passes the doubleValue round-trip, so only the >= 0 guard rejects it")
+  // Claim 2: the doubleValue round-trip is the sole catcher for an in-range
+  // fractional, because 4.7 truncates to a non-negative 4.
+  Harness.expect(
+    NSNumber(value: 4.7).intValue >= 0,
+    "4.7 truncates to a non-negative Int, so only the doubleValue guard rejects it")
+  // Claim 3: 1e19, NaN and infinity saturate intValue to Int.min, so BOTH the
+  // >= 0 guard and the doubleValue round-trip reject them. Neither is alone.
+  for (label, value) in [("1e19", 1e19), ("NaN", Double.nan), ("infinity", Double.infinity)] {
+    let n = NSNumber(value: value)
+    Harness.equal(n.intValue, Int.min, "\(label) saturates intValue to Int.min")
+    Harness.expect(
+      Double(n.intValue) != n.doubleValue,
+      "\(label) also fails the doubleValue round-trip, so the guards overlap")
+  }
+
+  // NaN and infinity must not decode either; both would make intValue
+  // meaningless.
+  for (label, value) in [("NaN", Double.nan), ("infinity", Double.infinity)] {
+    let bad = DriverAssertionStatus.decode(
+      aggregateValue: NSNumber(value: value), detailedValue: [[String: Any]]())
+    Harness.expect(bad.aggregateBits == nil, "\(label) is not a bitfield")
+    Harness.expect(!bad.isComplete, "\(label) makes the view incomplete")
+  }
+
   // And a well-formed integral value still decodes, including one stored as a
   // Double (CFNumber often is) and a large RegistryEntryID-sized integer.
   let integralDouble = DriverAssertionStatus.decode(
     aggregateValue: NSNumber(value: 4.0), detailedValue: [[String: Any]]())
   Harness.equal(
     integralDouble.aggregateBits, 4, "an integral Double bitfield still decodes")
+
+  // A giant that IS exactly an Int64 must still be accepted, even though its
+  // Double form is lossy: both sides of the comparison round identically. The
+  // guard's job is to reject non-integers and out-of-range values, not large
+  // ones. This pins the behavior the doc comment describes.
+  for (label, value) in [
+    ("2^53+1", Int64(1) << 53 + 1), ("Int64.max", Int64.max),
+    ("RegistryEntryID-sized", 4_296_141_543),
+  ] {
+    let giant = DriverAssertionStatus.decode(
+      aggregateValue: NSNumber(value: value), detailedValue: [[String: Any]]())
+    Harness.equal(
+      giant.aggregateBits, Int(value),
+      "\(label) is exactly representable and must decode")
+  }
+
+  // The out-of-range UInt64 case is caught, and the doc comment claims the
+  // >= 0 and doubleValue guards OVERLAP there rather than dividing the work.
+  // Pin that: intValue truncates it to a negative, so both guards reject it.
+  let overMax = NSNumber(value: UInt64(Int64.max) + 8)
+  Harness.expect(
+    overMax.intValue < 0, "a UInt64 above Int.max truncates to a negative Int")
+  Harness.expect(
+    Double(overMax.intValue) != overMax.doubleValue,
+    "the truncated negative also fails the doubleValue round-trip")
+  Harness.expect(
+    DriverAssertionStatus.decode(
+      aggregateValue: overMax, detailedValue: [[String: Any]]()
+    ).aggregateBits == nil,
+    "an out-of-range UInt64 is rejected")
 }
 
 func testLiveKernelDriverAssertionViewIsReadableAndReconciles() {

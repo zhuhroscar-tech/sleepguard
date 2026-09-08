@@ -250,18 +250,31 @@ public struct DriverAssertionStatus: Sendable {
   /// bitfield or level is never negative, and must not read as "nothing set"),
   /// and any value that is not exactly representable as an `Int`.
   ///
-  /// Which guard does what, measured rather than assumed:
-  /// * `candidate >= 0` rejects negatives *and* a `UInt64` above `Int.max`,
-  ///   because that value truncates to a negative `Int`.
-  /// * `Double(candidate) == number.doubleValue` rejects genuinely fractional
-  ///   values (`4.7`, `0.5`), out-of-`Int64`-range doubles (`1e19`), NaN and
-  ///   infinity — all of which `intValue` would otherwise turn into a
-  ///   plausible-looking integer the kernel never reported.
-  /// * `Int64(candidate) == number.int64Value` is, on this platform, a
-  ///   tautology: Swift's `NSNumber.intValue` is typed `Int`, which is 64-bit
-  ///   here, so it cannot disagree with `int64Value`. It is retained only as a
-  ///   guard against a 32-bit `Int` platform, where `intValue` would truncate.
-  ///   It is *not* what catches the out-of-range case; the `>= 0` check is.
+  /// Which guard rejects what, measured on this platform rather than assumed.
+  /// The guards overlap heavily; the honest summary is which is the *sole*
+  /// catcher for each class:
+  /// * `candidate >= 0` is the sole catcher for a negative already in range
+  ///   (`-1`), which round-trips through `doubleValue` perfectly.
+  /// * `Double(candidate) == number.doubleValue` is the sole catcher for a
+  ///   fractional value in range (`4.7` truncates to `4`, `0.5` to `0`) — the
+  ///   case where `intValue` yields a plausible-looking integer the kernel
+  ///   never reported.
+  /// * Both reject a value that saturates or wraps `intValue`: `1e19`, NaN and
+  ///   infinity all saturate to `Int.min`, and a `UInt64` above `Int.max`
+  ///   truncates to a negative. Each fails `>= 0` *and* fails the `doubleValue`
+  ///   round-trip, so neither guard is load-bearing alone there.
+  /// * `Int64(candidate) == number.int64Value` is a tautology here: Swift's
+  ///   `NSNumber.intValue` is typed `Int`, 64-bit on this platform, so it
+  ///   cannot disagree with `int64Value`. Measured, it rejects nothing. It is
+  ///   retained only against a 32-bit `Int` platform, where `intValue` would
+  ///   truncate.
+  ///
+  /// Note that a giant exactly representable as `Int64` (`2^53 + 1`,
+  /// `Int64.max`) is *accepted* even though its `Double` form is lossy: both
+  /// sides of the comparison suffer the same rounding. That is intended — such
+  /// a value is a real integer the kernel could in principle report, and this
+  /// function's job is to reject values that are not integers or not in range,
+  /// not to reject large ones.
   static func decodeNonNegativeInt(_ value: Any?) -> Int? {
     guard
       let number = value as? NSNumber,
