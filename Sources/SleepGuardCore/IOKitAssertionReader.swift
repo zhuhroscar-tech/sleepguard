@@ -91,6 +91,48 @@ public struct IOKitAssertionReader {
     return AggregateAssertionStatus.decode(rawTable: table)
   }
 
+  /// Reads the kernel driver assertion view from `IOPMrootDomain`.
+  ///
+  /// Read-only, like every other method here. Two documented `IOPM.h` registry
+  /// keys: `kIOPMAssertionsDriverKey` ("DriverPMAssertions", the aggregate
+  /// bitfield) and `kIOPMAssertionsDriverDetailedKey`
+  /// ("DriverPMAssertionsDetailed", the per-record array with an `Owner`).
+  ///
+  /// This is the coverage that `IOPMCopyAssertionsStatus` was measured *not* to
+  /// provide: `kIOPMDriverAssertionPreventSystemIdleSleepBit` is header-cited
+  /// as preventing idle sleep, and the detailed array names the driver holding
+  /// it.
+  ///
+  /// A failed read degrades to an incomplete view rather than throwing, so it
+  /// reduces the confidence of the report instead of destroying an otherwise
+  /// valid process-held scan. An unreadable property is never reported as
+  /// "no driver asserts".
+  public func driverAssertionStatus() -> DriverAssertionStatus {
+    let root = IOServiceGetMatchingService(
+      kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+    guard root != 0 else {
+      return DriverAssertionStatus.decode(aggregateValue: nil, detailedValue: nil)
+    }
+    defer { IOObjectRelease(root) }
+
+    // Read the detailed array FIRST, then the aggregate bitfield. The two
+    // properties are read non-atomically, so a driver asserting between the two
+    // reads must not appear as an aggregate bit with no owning record — which
+    // would be reported as an unattributed kernel blocker. Reading detail first
+    // means a mid-scan acquisition instead surfaces as a record whose bits are
+    // missing from the aggregate; that direction is also flagged as a mismatch,
+    // and both directions fail closed, so ordering cannot produce a *clean*
+    // answer either way.
+    let detailed = IORegistryEntryCreateCFProperty(
+      root, "DriverPMAssertionsDetailed" as CFString, kCFAllocatorDefault, 0
+    )?.takeRetainedValue()
+    let aggregate = IORegistryEntryCreateCFProperty(
+      root, "DriverPMAssertions" as CFString, kCFAllocatorDefault, 0
+    )?.takeRetainedValue()
+
+    return DriverAssertionStatus.decode(aggregateValue: aggregate, detailedValue: detailed)
+  }
+
   /// Reads the standing `SleepDisabled` system setting, which is not an assertion.
   ///
   /// Returns `nil` when the value could not be read at all, so a failed lookup

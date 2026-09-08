@@ -217,17 +217,26 @@ public struct SleepDiagnosis: Sendable {
 
   /// Tri-state verdict. `nil` means "cannot determine".
   ///
-  /// This is a function taking the aggregate view for the same reason
-  /// `canProveSleepIsUnblocked` is: as a property it could return `false` — an
-  /// affirmative clean answer — while the aggregate table reported an
-  /// unattributed blocker or could not be read at all, contradicting its own
-  /// sibling API on the same state. A consumer must not be able to get "not
-  /// blocked" without consulting both views.
+  /// This is a function taking **both** the aggregate table and the kernel
+  /// driver view for the same reason `canProveSleepIsUnblocked` is: as a
+  /// property it could return `false` — an affirmative clean answer — while a
+  /// kernel driver held a documented idle-sleep assertion or a view could not
+  /// be read at all. A consumer must not be able to get "not blocked" without
+  /// consulting every view this build knows how to read. Neither parameter has
+  /// a default value: silently defaulting to an empty view is exactly the
+  /// fail-open path this signature exists to close.
   ///
   /// A confirmed blocker is decisive even on an incomplete scan: finding more
-  /// evidence could never turn a real blocker into a clean result.
-  public func systemSleepIsBlocked(aggregate: AggregateAssertionStatus) -> Bool? {
+  /// evidence could never turn a real blocker into a clean result. That applies
+  /// to a kernel driver blocker too, since
+  /// `kIOPMDriverAssertionPreventSystemIdleSleepBit` is header-cited as
+  /// preventing idle sleep.
+  public func systemSleepIsBlocked(
+    aggregate: AggregateAssertionStatus,
+    driver: DriverAssertionStatus
+  ) -> Bool? {
     if !systemSleepBlockers.isEmpty { return true }
+    if !driver.documentedIdleSleepBlockers.isEmpty { return true }
     if sleepDisabledSetting == true { return true }
     if sleepDisabledSetting == nil { return nil }
     if !sourceWasComplete { return nil }
@@ -235,26 +244,37 @@ public struct SleepDiagnosis: Sendable {
     if !aggregate.isComplete { return nil }
     if !unattributedBlockingTypes(aggregate: aggregate).isEmpty { return nil }
     if !novelUnclassifiedAggregateTypes(aggregate: aggregate).isEmpty { return nil }
+    if !driver.isComplete { return nil }
+    if !driver.unclassifiedAssertedRecords.isEmpty { return nil }
     return false
   }
 
   /// True only when a clean result is actually provable.
   ///
   /// This is a function, not a property, on purpose: proving that nothing is
-  /// blocking sleep requires the system-wide aggregate table as well as the
-  /// process-held one, so the caller cannot obtain a clean verdict without
-  /// supplying it. The previous property form let a library consumer prove
-  /// "unblocked" while never consulting the aggregate view at all, which is the
-  /// blind spot this API exists to close.
+  /// blocking sleep requires the system-wide aggregate table and the kernel
+  /// driver assertion view as well as the process-held one, so the caller
+  /// cannot obtain a clean verdict without supplying them. The previous
+  /// property form let a library consumer prove "unblocked" while never
+  /// consulting the other views at all, which is the blind spot this API exists
+  /// to close.
   ///
   /// Requires: the process snapshot decoded completely, the aggregate table
-  /// decoded completely, the standing setting was read, and there are no
-  /// blockers, no unclassified process assertions, no unattributed aggregate
-  /// blockers and no unclassified active aggregate types.
-  public func canProveSleepIsUnblocked(aggregate: AggregateAssertionStatus) -> Bool {
-    sourceWasComplete && aggregate.isComplete && sleepDisabledSetting == false
+  /// decoded completely, the kernel driver view decoded and reconciled
+  /// completely, the standing setting was read, and there are no blockers, no
+  /// unclassified process assertions, no unattributed aggregate blockers, no
+  /// unclassified active aggregate types, no kernel driver idle-sleep blockers
+  /// and no asserted kernel records of unknown effect.
+  public func canProveSleepIsUnblocked(
+    aggregate: AggregateAssertionStatus,
+    driver: DriverAssertionStatus
+  ) -> Bool {
+    sourceWasComplete && aggregate.isComplete && driver.isComplete
+      && sleepDisabledSetting == false
       && systemSleepBlockers.isEmpty && unclassifiedAssertions.isEmpty
       && unattributedBlockingTypes(aggregate: aggregate).isEmpty
       && novelUnclassifiedAggregateTypes(aggregate: aggregate).isEmpty
+      && driver.documentedIdleSleepBlockers.isEmpty
+      && driver.unclassifiedAssertedRecords.isEmpty
   }
 }

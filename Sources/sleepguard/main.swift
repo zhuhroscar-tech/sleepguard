@@ -22,6 +22,7 @@ do {
   // a second aggregate read before any unattributed claim is made.
   let firstAggregate = reader.aggregateStatus()
   let snapshot = try reader.snapshot()
+  let driver = reader.driverAssertionStatus()
   let sleepDisabled = reader.sleepDisabledSetting()
   let diagnosis = SleepDiagnosis(snapshot: snapshot, sleepDisabledSetting: sleepDisabled)
 
@@ -89,6 +90,44 @@ do {
         + "IOPMLib.h classification in this build; their effect on sleep is unknown: "
         + novelTypes.joined(separator: ", "))
   }
+  if !driver.isComplete {
+    uncertain = true
+    var detail = ""
+    if driver.aggregateBits == nil {
+      detail = " The DriverPMAssertions bitfield could not be read."
+    } else if driver.detailedPayloadWasUnreadable {
+      detail = " The DriverPMAssertionsDetailed array could not be read."
+    } else if driver.malformedRecordCount > 0 {
+      detail = " \(driver.malformedRecordCount) kernel record(s) could not be decoded."
+    } else if driver.unattributedAssertedBits != 0 {
+      detail =
+        " The kernel reports assertion bit(s) "
+        + driver.bitNames(driver.unattributedAssertedBits).joined(separator: ", ")
+        + " set with no readable driver record to own them."
+    } else if driver.recordBitsMissingFromAggregate != 0 {
+      detail =
+        " A driver record claims bit(s) "
+        + driver.bitNames(driver.recordBitsMissingFromAggregate).joined(separator: ", ")
+        + " that the aggregate bitfield does not report."
+    }
+    print(
+      "WARNING: the kernel driver assertion view (IOPMrootDomain DriverPMAssertions) could "
+        + "not be read consistently, so a kernel driver blocking idle sleep could go "
+        + "unnoticed. This scan is INCOMPLETE." + detail)
+  }
+  if !driver.unclassifiedAssertedRecords.isEmpty {
+    uncertain = true
+    print(
+      "WARNING: \(driver.unclassifiedAssertedRecords.count) kernel driver assertion(s) are "
+        + "active whose bits carry no IOPM.h statement about idle sleep, so their effect is "
+        + "unknown. They are neither certified harmless nor counted as blockers:")
+    for record in driver.unclassifiedAssertedRecords {
+      let unknownBits = record.bits & ~DriverAssertionStatus.preventSystemIdleSleepBit
+      print(
+        "  ? \(record.owner) (kernel driver, id \(record.id)) — "
+          + driver.bitNames(unknownBits).joined(separator: ", "))
+    }
+  }
   if sleepDisabled == nil {
     uncertain = true
     print("WARNING: could not read the standing SleepDisabled setting. This scan is INCOMPLETE.")
@@ -113,11 +152,30 @@ do {
     print("")
   }
 
+  let kernelBlockers = driver.documentedIdleSleepBlockers
+  if !kernelBlockers.isEmpty {
+    print(
+      "Idle sleep is blocked by \(kernelBlockers.count) kernel driver assertion(s) "
+        + "(IOPM.h: PreventSystemIdleSleep — \"When set, the system should not idle sleep\"):")
+    for record in kernelBlockers {
+      print("  • \(record.owner) (kernel driver, id \(record.id))")
+      print("      bits: " + driver.bitNames(record.bits).joined(separator: ", "))
+    }
+    print("")
+    print(
+      "A kernel driver assertion is held by a driver, not an app: there is no process to "
+        + "quit. Detaching the responsible hardware or peripheral is usually what releases "
+        + "it. sleepguard will not touch it.")
+    print("")
+  }
+
   if diagnosis.systemSleepBlockers.isEmpty {
-    if diagnosis.canProveSleepIsUnblocked(aggregate: aggregate) {
-      print("No process-held assertion is blocking idle sleep.")
+    if diagnosis.canProveSleepIsUnblocked(aggregate: aggregate, driver: driver) {
+      print("No process-held or kernel driver assertion is blocking idle sleep.")
     } else if sleepDisabled == true {
       print("No process-held assertion is blocking idle sleep, but SleepDisabled=1 is.")
+    } else if !kernelBlockers.isEmpty {
+      print("No *process-held* assertion is blocking idle sleep; the blocker above is a driver.")
     } else {
       print("No *recognized* sleep-blocking assertion was found, but see the warnings above.")
     }
@@ -138,16 +196,16 @@ do {
 
   print("")
   print(
-    "Scope: owners are named only for process-held assertions "
-      + "(IOPMCopyAssertionsByProcess). The system-wide aggregate table "
+    "Scope: owners are named for process-held assertions "
+      + "(IOPMCopyAssertionsByProcess) and for kernel driver assertions "
+      + "(IOPMrootDomain DriverPMAssertions/Detailed). The system-wide aggregate table "
       + "(IOPMCopyAssertionsStatus) is also read, and it catches a sleep-blocking type "
       + "asserted with no readable process record to account for it. Same-type masking "
       + "is a known limit: a level measures as a 0/1 flag, not a holder count. "
-      + "Kernel-level preventers — the `Kernel Assertions` and "
-      + "`Idle sleep preventers: IODisplayWrangler` lines in `pmset -g assertions` — "
-      + "remain structurally invisible: measured on macOS 15.7.4, active kernel USB "
-      + "assertions and IODisplayWrangler raised no aggregate level. Scheduled dark "
-      + "wakes and Power Nap are NOT covered.")
+      + "The `Idle sleep preventers:` line in `pmset -g assertions` (for example "
+      + "IODisplayWrangler) is a power-plane concept, NOT a driver assertion, and remains "
+      + "structurally invisible; measured on macOS 15.7.4 it raised no aggregate level. "
+      + "Scheduled dark wakes and Power Nap are NOT covered.")
 
   let baseline = diagnosis.baselineActiveAggregateTypes(aggregate: aggregate)
   if !baseline.isEmpty {
@@ -168,7 +226,7 @@ do {
   // the verdict recomputes on the confirming read, so a type seen only in the
   // second read yields nil with nothing printed. Mapping nil to 0 would report
   // "provably unblocked" in exactly that state.
-  let verdict = diagnosis.systemSleepIsBlocked(aggregate: aggregate)
+  let verdict = diagnosis.systemSleepIsBlocked(aggregate: aggregate, driver: driver)
   if verdict == true { exit(3) }
   if verdict == nil || uncertain { exit(2) }
   exit(0)

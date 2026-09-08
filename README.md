@@ -4,7 +4,8 @@
 
 `sleepguard` answers one question: *why will this Mac not go to sleep?* It reads
 the live IOKit power-assertion table, names the process holding each
-sleep-blocking assertion, how long it has held it, and whether the standing
+sleep-blocking assertion, how long it has held it, names any **kernel driver**
+holding a documented idle-sleep assertion, and reports whether the standing
 `SleepDisabled` system setting is on.
 
 ## Why
@@ -33,43 +34,81 @@ Verified locally on macOS 15.7.4 (24G517): a single Electron app held a
   can exit and be reused, so nothing is ever acted upon.
 - Anything it cannot decode, cannot classify, or cannot read marks the scan
   **incomplete** (exit `2`) rather than reporting a clean result. Absence of
-  evidence is not evidence of absence. This covers four distinct cases: an
-  undecodable assertion record, an assertion type this build does not recognize,
-  a failed `SleepDisabled` lookup, and an assertion table that comes back empty
-  (a running Mac always holds at least one process assertion, so zero entries
-  means a failed or restricted read, not an idle system).
+  evidence is not evidence of absence. This covers: an undecodable assertion
+  record, an assertion type this build does not recognize, a failed
+  `SleepDisabled` lookup, an assertion table that comes back empty (a running
+  Mac always holds at least one process assertion, so zero entries means a
+  failed or restricted read, not an idle system), an unreadable or
+  self-inconsistent kernel driver assertion view, and an asserted kernel driver
+  record whose bits carry no documented idle-sleep semantics.
 - The fail-closed rule is enforced in `SleepGuardCore` itself, not just in the
   CLI: `SleepDiagnosis` requires a `sourceWasComplete` argument with no default,
-  so a library consumer cannot obtain a provably-clean verdict from an
-  incomplete snapshot by forgetting to check a flag.
+  and both `systemSleepIsBlocked` and `canProveSleepIsUnblocked` are *functions*
+  requiring the aggregate table **and** the kernel driver view as arguments with
+  no defaults. A library consumer therefore cannot obtain a provably-clean
+  verdict by forgetting to check a flag or by never consulting a view.
 
 ## Known scope limits
 
-- **Kernel-level preventers remain structurally invisible.** The
-  `Kernel Assertions` and `Idle sleep preventers: IODisplayWrangler` lines in
-  `pmset -g assertions` are not exposed by any API this tool uses. Measured on
-  macOS 15.7.4 with three active kernel USB assertions and `IODisplayWrangler`
-  reported as an active idle-sleep preventer, **no key in the aggregate
-  `IOPMCopyAssertionsStatus` table changed.** That table aggregates the same
-  assertion accounting as `IOPMCopyAssertionsByProcess`; IOPMLib.h documents
-  nothing about kernel contribution to its levels, so per this project's
-  citation-only rule no coverage is claimed.
-- **Owners** are named only for **process-held** assertions. The aggregate table
-  is used for one narrower purpose: if a sleep-blocking type is asserted
-  system-wide with no readable process record to account for it, the scan is
-  marked incomplete and the type is reported as **unattributed**. That catches an
-  unreadable record or a holder the by-process enumeration missed — not a kernel
-  assertion. The owner still cannot be named.
+- **Kernel driver assertions ARE now covered, with owners.** `IOPMrootDomain`
+  publishes two documented `IOPM.h` registry properties — `DriverPMAssertions`
+  (`kIOPMAssertionsDriverKey`, an aggregate bitfield) and
+  `DriverPMAssertionsDetailed` (`kIOPMAssertionsDriverDetailedKey`, a per-record
+  array carrying an `Owner` string). `sleepguard` reads both, reconciles them in
+  both directions, and reports a named kernel idle-sleep blocker when a record
+  asserts `kIOPMDriverAssertionPreventSystemIdleSleepBit` (0x02), which `IOPM.h`
+  documents as *"When set, the system should not idle sleep. This does not
+  prevent demand sleep."* Verified against `pmset -g assertions` on macOS 15.7.4:
+  the three live `0x4=USB` kernel records (ids 7017/7019/7020) decode with
+  matching IDs, levels and bits.
+
+  This build does **not** claim these properties always exist. They were
+  measured present on one macOS 15.7.4 host; an absent or unreadable property
+  makes the scan incomplete, and the live test skips with a stated reason
+  rather than asserting presence.
+
+  A caveat on names: `pmset` prints two strings per kernel record
+  (`owner=USB3.1 Hub` and `description=com.apple.usb.externaldevice.0d400000`).
+  The registry `Owner` key holds the *latter*, so that is what `sleepguard`
+  prints. It is the authoritative field, not the friendlier one.
+
+  Only bit `0x02` has an `IOPM.h` idle-sleep statement. Every other bit — `CPU`,
+  `USBExternalDevice`, `BluetoothHIDDevicePaired`, `ExternalMediaMounted`,
+  `PreventDisplaySleep`, the reserved bits and the network-wake bits — carries no
+  statement about idle sleep in either direction, so an asserted record holding
+  only those is reported as **unknown-effect** and makes the scan incomplete. It
+  is never certified harmless and never reported as a blocker.
+- **`Idle sleep preventers:` is still invisible.** The
+  `Idle sleep preventers: IODisplayWrangler` line in `pmset -g assertions` is a
+  power-plane concept, **not** a driver assertion and not an assertion-subsystem
+  entry. It appears in neither of the driver properties above, and measured on
+  macOS 15.7.4 it raised no key in the aggregate `IOPMCopyAssertionsStatus`
+  table either. No documented public API known to this project exposes it, so no
+  coverage is claimed.
+- **`IOPMCopyAssertionsStatus` does not see the kernel.** Measured on macOS
+  15.7.4 with three active kernel USB assertions and `IODisplayWrangler`
+  reported as an active idle-sleep preventer, **no key in that aggregate table
+  changed.** It aggregates the same accounting as
+  `IOPMCopyAssertionsByProcess`. The kernel coverage above comes from the
+  `IOPMrootDomain` registry properties instead, which is why they were added.
+- **Process owners** are named only for **process-held** assertions. The
+  aggregate table is used for one narrower purpose: if a sleep-blocking type is
+  asserted system-wide with no readable process record to account for it, the
+  scan is marked incomplete and the type is reported as **unattributed**. That
+  catches an unreadable record or a holder the by-process enumeration missed.
+  The owner still cannot be named.
 - **Same-type masking is a known limit.** Measured on macOS 15.7.4, an aggregate
   level behaves as a 0/1 asserted flag rather than a holder count: three
   simultaneous holders of one type still reported level 1. So if a readable
   process record accounts for a type, a second *unreadable* holder of that same
   type cannot be detected through this API.
 - Scheduled dark wakes and Power Nap are not covered.
-- A clean `sleepguard` report therefore means "no process-held assertion is
-  blocking idle sleep, and every aggregate sleep-blocking level is accounted
-  for". It does **not** mean "nothing can keep this Mac awake". For that, read
-  `pmset -g assertions`.
+- A clean `sleepguard` report therefore means "no process-held assertion and no
+  documented kernel driver assertion is blocking idle sleep, every aggregate
+  sleep-blocking level is accounted for, and no asserted kernel record has
+  unknown sleep semantics". It does **not** mean "nothing can keep this Mac
+  awake" — `IODisplayWrangler`-style idle sleep preventers remain outside every
+  API used here. For those, read `pmset -g assertions`.
 
 `PreventUserIdleDisplaySleep` is classified as an idle-sleep blocker on the
 authority of `IOPMLib.h`: *"While the display is prevented from dimming, the
@@ -140,17 +179,67 @@ malformed-record handling (evidence preserved, completeness flagged), negative
 identifier rejection, unknown-duration handling, the tri-state `SleepDisabled`
 lookup, the unexpected-shape throw path, aggregate-table decoding (malformed keys and
 values, Booleans rejected as levels, NULL and empty tables), unattributed
-aggregate blockers including the deprecated-alias equivalence, and three real
-live-IOKit integration checks against the running system.
+aggregate blockers including the deprecated-alias equivalence, kernel driver
+assertion decoding (real registry byte shapes, level-0 records excluded,
+bidirectional aggregate/record reconciliation, unreadable bitfield, unreadable
+detailed array, Boolean and negative bitfields, non-array payload, missing and
+blank required fields, undecodable levels, non-integral and out-of-range
+numbers rejected rather than truncated, bit-name rendering of unknown and
+negative bitfields), the kernel blocker's effect on the tri-state verdict and
+the clean proof, unknown-effect kernel bits being neither blockers nor certified
+harmless, process-blocker precedence over an incomplete kernel view, and four
+real live-IOKit integration checks against the running system (the kernel-view
+check skips with a stated reason if the host publishes no readable driver
+assertion properties).
+
+## Verification against `pmset`
+
+`pmset -g assertions` is the ground truth. On macOS 15.7.4 the `sleepguard`
+release binary was diffed against it directly: the same process-held blocker
+(`screensharingd` pid 33841, `PreventSystemSleep`, "Remote user is connected",
+7h34m), the same two unclassified `UserIsActive` holders, and the same three
+kernel `0x4=USB` records (ids 7017/7019/7020 at level 255) reported as
+unknown-effect. Exit `3`, blocked, as expected.
+
+The kernel records were also read back independently through `ioreg` before the
+decoder was written, and again afterwards with every field included, so the
+fixture IDs, levels and bits are transcribed rather than assumed. The raw
+captures are `evidence/kernel-driver-assertions-feasibility-2026-09-07c.txt`
+(header citations plus the initial capture) and
+`evidence/kernel-driver-assertions-live-verification-2026-09-08.txt` (the full
+seven-key record shape with `ID` values, alongside the matching `pmset` output).
+Both are outside this package, in the parent factory workspace.
+
+One host is one host. These are two measurements on a single macOS 15.7.4
+laptop; nothing here establishes that `IOPMrootDomain` always publishes these
+properties, which is why the live test skips with a stated reason rather than
+failing when they are absent.
 
 ## APIs used
 
 Documented public IOKit power-management API only:
 `IOPMCopyAssertionsByProcess` (process-held assertions),
-`IOPMCopyAssertionsStatus` (system-wide aggregate levels),
-`IOServiceGetMatchingService` / `IORegistryEntryCreateCFProperty` for
-`IOPMrootDomain.SleepDisabled`. No private APIs, no kernel extensions, no SIP
-changes.
+`IOPMCopyAssertionsStatus` (system-wide aggregate levels), and
+`IOServiceGetMatchingService` / `IORegistryEntryCreateCFProperty` to read three
+`IOPMrootDomain` registry properties.
+
+Two of those three property names are declared as public constants in the SDK
+header `IOKit/pwr_mgt/IOPM.h`: `DriverPMAssertions`
+(`kIOPMAssertionsDriverKey`) and `DriverPMAssertionsDetailed`
+(`kIOPMAssertionsDriverDetailedKey`), along with the per-record key names
+(`kIOPMDriverAssertionIDKey`, `kIOPMDriverAssertionOwnerStringKey`,
+`kIOPMDriverAssertionLevelKey`, `kIOPMDriverAssertionAssertedKey`) and the
+`kIOPMDriverAssertion*Bit` enumeration.
+
+The third, `SleepDisabled`, is **not** declared anywhere in the IOKit SDK
+headers — it is an undocumented registry property name, read through the
+documented registry API. That is a real gap in this tool's citation chain and is
+stated here rather than glossed over: the *API* is public, the *property name*
+is not. It is used only as a tri-state read whose failure marks the scan
+incomplete, so an unknown name degrades confidence rather than producing a false
+clean verdict.
+
+No private APIs, no kernel extensions, no SIP changes.
 
 ## License
 
