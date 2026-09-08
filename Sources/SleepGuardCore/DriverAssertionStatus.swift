@@ -11,7 +11,15 @@ public struct DriverAssertionRecord: Equatable, Sendable {
   public let id: UInt64
   /// `kIOPMDriverAssertionOwnerStringKey` — the driver's own name string.
   public let owner: String
-  /// `kIOPMDriverAssertionLevelKey`. Greater than zero means asserted.
+  /// `kIOPMDriverAssertionLevelKey`. Greater than zero is treated as asserted.
+  ///
+  /// **This is an assumption, not a citation.** `IOPM.h` declares the key but
+  /// does not define its value semantics. Measured values on macOS 15.7.4 and
+  /// on a GitHub macos-15 runner were only ever `0` or `255`, and `pmset`
+  /// prints exactly the `level=255` records under `Kernel Assertions`, which is
+  /// consistent with 0/nonzero meaning inactive/active. If a future OS gives
+  /// levels a graded meaning, this reading could misclassify — that would show
+  /// up as a record reported asserted when `pmset` does not list it.
   public let level: Int
   /// `kIOPMDriverAssertionAssertedKey` — the bitfield of `kIOPMDriverAssertion*Bit`
   /// values this record asserts.
@@ -97,16 +105,23 @@ public struct DriverAssertionStatus: Sendable {
   /// no entry in the header enumeration are rendered as `unknown(0x…)` rather
   /// than dropped, so an unrecognized bit can never vanish from the report.
   ///
+  /// Static because it reads no instance state: it maps a bitfield to header
+  /// names and nothing more. As an instance method every caller had to reach
+  /// for some arbitrary `DriverAssertionStatus` value to call it, which read as
+  /// though that value were the subject of the question.
+  ///
   /// A negative input cannot come from `decode` (which rejects negatives), but
-  /// this method is public, so a negative is rendered explicitly rather than
-  /// silently returning an empty list — an empty list reads as "nothing set",
-  /// which is exactly the fail-open answer this project forbids.
-  public func bitNames(_ bits: Int) -> [String] {
-    if bits < 0 { return ["invalid(\(bits))"] }
+  /// this method is public, so a negative is rendered explicitly — in hex, like
+  /// every other bit rendering here — rather than silently returning an empty
+  /// list. An empty list reads as "nothing set", which is exactly the fail-open
+  /// answer this project forbids.
+  public static func bitNames(_ bits: Int) -> [String] {
+    // `-bits` would trap on Int.min, so negate in the magnitude domain.
+    if bits < 0 { return ["invalid(-0x" + String(bits.magnitude, radix: 16) + ")"] }
     guard bits > 0 else { return [] }
     var names: [String] = []
     var unaccounted = bits
-    for entry in Self.bitNameTable where bits & entry.bit != 0 {
+    for entry in bitNameTable where bits & entry.bit != 0 {
       names.append(entry.name)
       unaccounted &= ~entry.bit
     }
@@ -235,11 +250,18 @@ public struct DriverAssertionStatus: Sendable {
   /// bitfield or level is never negative, and must not read as "nothing set"),
   /// and any value that is not exactly representable as an `Int`.
   ///
-  /// That last check matters: `NSNumber.intValue` silently truncates. A
-  /// fractional `4.7` would become `4` and a `UInt64` above `Int.max` would
-  /// become a negative — either would fabricate a bitfield or level the kernel
-  /// never reported. Requiring `intValue` to round-trip through `int64Value`
-  /// *and* `doubleValue` rejects both without trusting the truncation.
+  /// Which guard does what, measured rather than assumed:
+  /// * `candidate >= 0` rejects negatives *and* a `UInt64` above `Int.max`,
+  ///   because that value truncates to a negative `Int`.
+  /// * `Double(candidate) == number.doubleValue` rejects genuinely fractional
+  ///   values (`4.7`, `0.5`), out-of-`Int64`-range doubles (`1e19`), NaN and
+  ///   infinity — all of which `intValue` would otherwise turn into a
+  ///   plausible-looking integer the kernel never reported.
+  /// * `Int64(candidate) == number.int64Value` is, on this platform, a
+  ///   tautology: Swift's `NSNumber.intValue` is typed `Int`, which is 64-bit
+  ///   here, so it cannot disagree with `int64Value`. It is retained only as a
+  ///   guard against a 32-bit `Int` platform, where `intValue` would truncate.
+  ///   It is *not* what catches the out-of-range case; the `>= 0` check is.
   static func decodeNonNegativeInt(_ value: Any?) -> Int? {
     guard
       let number = value as? NSNumber,

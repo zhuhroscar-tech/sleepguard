@@ -78,6 +78,14 @@ Verified locally on macOS 15.7.4 (24G517): a single Electron app held a
   statement about idle sleep in either direction, so an asserted record holding
   only those is reported as **unknown-effect** and makes the scan incomplete. It
   is never certified harmless and never reported as a blocker.
+- **`Level > 0 means asserted` is an assumption, not a citation.** `IOPM.h`
+  declares `kIOPMDriverAssertionLevelKey` but never defines its value
+  semantics. Measured levels were only ever `0` or `255` (on macOS 15.7.4 and
+  on a GitHub macos-15 runner), and `pmset` lists exactly the `level=255`
+  records under `Kernel Assertions`, which is consistent with 0/nonzero meaning
+  inactive/active. If a future OS gives levels a graded meaning this reading
+  could misclassify. It is called out here because the project's citation-only
+  rule applies to documentation claims too.
 - **`Idle sleep preventers:` is still invisible.** The
   `Idle sleep preventers: IODisplayWrangler` line in `pmset -g assertions` is a
   power-plane concept, **not** a driver assertion and not an assertion-subsystem

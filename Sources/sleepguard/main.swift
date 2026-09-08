@@ -102,12 +102,13 @@ do {
     } else if driver.unattributedAssertedBits != 0 {
       detail =
         " The kernel reports assertion bit(s) "
-        + driver.bitNames(driver.unattributedAssertedBits).joined(separator: ", ")
+        + DriverAssertionStatus.bitNames(driver.unattributedAssertedBits).joined(separator: ", ")
         + " set with no readable driver record to own them."
     } else if driver.recordBitsMissingFromAggregate != 0 {
       detail =
         " A driver record claims bit(s) "
-        + driver.bitNames(driver.recordBitsMissingFromAggregate).joined(separator: ", ")
+        + DriverAssertionStatus.bitNames(driver.recordBitsMissingFromAggregate).joined(
+          separator: ", ")
         + " that the aggregate bitfield does not report."
     }
     print(
@@ -125,7 +126,7 @@ do {
       let unknownBits = record.bits & ~DriverAssertionStatus.preventSystemIdleSleepBit
       print(
         "  ? \(record.owner) (kernel driver, id \(record.id)) — "
-          + driver.bitNames(unknownBits).joined(separator: ", "))
+          + DriverAssertionStatus.bitNames(unknownBits).joined(separator: ", "))
     }
   }
   if sleepDisabled == nil {
@@ -159,7 +160,7 @@ do {
         + "(IOPM.h: PreventSystemIdleSleep — \"When set, the system should not idle sleep\"):")
     for record in kernelBlockers {
       print("  • \(record.owner) (kernel driver, id \(record.id))")
-      print("      bits: " + driver.bitNames(record.bits).joined(separator: ", "))
+      print("      bits: " + DriverAssertionStatus.bitNames(record.bits).joined(separator: ", "))
     }
     print("")
     print(

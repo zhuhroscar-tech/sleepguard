@@ -270,7 +270,7 @@ func testDriverAssertionsDecodeRealIORegistryShapeWithOwnerAttribution() {
     realBlocker.unclassifiedAssertedRecords, [],
     "a fully header-cited record is not unclassified")
   Harness.equal(
-    realBlocker.bitNames(2), ["PreventSystemIdleSleep"],
+    DriverAssertionStatus.bitNames(2), ["PreventSystemIdleSleep"],
     "bit names come from the SDK header enum")
 
   // Reconciliation: an aggregate bit with no asserted detailed record means the
@@ -1050,26 +1050,31 @@ func testUnknownEffectOrUnreadableKernelViewBlocksACleanVerdict() {
 }
 
 func testBitNamesNeverSilentlyDropsOrFabricatesInformation() {
-  let quiet = quietDriverAssertions
-
   // A bit outside the IOPM.h enumeration (0x400) must surface as unknown, not
   // vanish. This is the one path designed to catch a future OS adding a bit.
   Harness.equal(
-    quiet.bitNames(0x400), ["unknown(0x400)"],
+    DriverAssertionStatus.bitNames(0x400), ["unknown(0x400)"],
     "a bit absent from the header enumeration is reported as unknown")
   Harness.equal(
-    quiet.bitNames(0x402), ["PreventSystemIdleSleep", "unknown(0x400)"],
+    DriverAssertionStatus.bitNames(0x402), ["PreventSystemIdleSleep", "unknown(0x400)"],
     "a known and an unknown bit are both reported")
   Harness.equal(
-    quiet.bitNames(0x3FF).count, 10,
+    DriverAssertionStatus.bitNames(0x3FF).count, 10,
     "every bit in the header enumeration has a name")
-  Harness.equal(quiet.bitNames(0), [], "no bits set yields no names")
+  Harness.equal(DriverAssertionStatus.bitNames(0), [], "no bits set yields no names")
 
   // A negative must not render as "nothing set". bitNames is public, so this
-  // is reachable even though decode rejects negatives upstream.
+  // is reachable even though decode rejects negatives upstream. It renders in
+  // hex, consistently with every other bit rendering here.
   Harness.equal(
-    quiet.bitNames(-8), ["invalid(-8)"],
-    "a negative bitfield is reported as invalid, never as empty")
+    DriverAssertionStatus.bitNames(-8), ["invalid(-0x8)"],
+    "a negative bitfield is reported as invalid in hex, never as empty")
+
+  // Int.min is the adversarial case: negating it in the Int domain would trap
+  // and crash the process, which is a worse failure than any wrong answer.
+  Harness.equal(
+    DriverAssertionStatus.bitNames(Int.min), ["invalid(-0x8000000000000000)"],
+    "Int.min renders without trapping on negation overflow")
 }
 
 func testNonIntegralOrOversizedNumbersAreRejectedRatherThanTruncated() {
