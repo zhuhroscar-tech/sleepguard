@@ -11,11 +11,13 @@ let package = Package(
   products: [
     .library(name: "SleepGuardCore", targets: ["SleepGuardCore"]),
     .executable(name: "sleepguard", targets: ["sleepguard"]),
+    .executable(name: "SleepGuardMenuBar", targets: ["SleepGuardMenuBar"]),
     .executable(name: "sleepguard-tests", targets: ["sleepguard-tests"]),
   ],
   targets: [
     .target(name: "SleepGuardCore"),
     .executableTarget(name: "sleepguard", dependencies: ["SleepGuardCore"]),
+    .executableTarget(name: "SleepGuardMenuBar", dependencies: ["SleepGuardCore"]),
     .executableTarget(name: "sleepguard-tests", dependencies: ["SleepGuardCore"]),
   ]
 )

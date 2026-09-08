@@ -36,9 +36,10 @@ Verified locally on macOS 15.7.4 (24G517): a single Electron app held a
   **incomplete** (exit `2`) rather than reporting a clean result. Absence of
   evidence is not evidence of absence. This covers: an undecodable assertion
   record, an assertion type this build does not recognize, a failed
-  `SleepDisabled` lookup, an assertion table that comes back empty (a running
-  Mac always holds at least one process assertion, so zero entries means a
-  failed or restricted read, not an idle system), an unreadable or
+  `SleepDisabled` lookup, an assertion table that comes back empty (every macOS
+  host this project has measured held at least one process assertion, so zero
+  entries is treated as a failed or restricted read rather than an idle system —
+  the fail-closed reading, not a documented guarantee), an unreadable or
   self-inconsistent kernel driver assertion view, and an asserted kernel driver
   record whose bits carry no documented idle-sleep semantics.
 - The fail-closed rule is enforced in `SleepGuardCore` itself, not just in the
@@ -124,10 +125,59 @@ system cannot go into idle sleep."*
 
 ## Build and run
 
+Two surfaces share one tested core (`SleepGuardCore`).
+
+### Command line
+
 ```sh
 swift build -c release
 ./.build/release/sleepguard
 ```
+
+### Menu-bar app (prototype)
+
+```sh
+bash scripts/build_app.sh
+open dist/SleepGuard.app
+```
+
+`SleepGuard.app` is a menu-bar-only (`LSUIElement`) surface: it shows the same
+findings, with a Rescan button. It is a **development preview**, not a release:
+
+- The bundle is **ad-hoc signed**. Ad-hoc signing proves local bundle integrity
+  only. There is **no Developer ID signature and no notarization**, so Gatekeeper
+  will refuse it on another Mac. No signed or notarized release asset exists and
+  none is claimed.
+- No release binary is published. Build it yourself from source.
+
+Verified on macOS 15.7.4 (x86_64): `plutil -lint` OK, `codesign --verify
+--deep --strict` OK, `ApplicationType=UIElement`, launches and stays resident,
+quits cleanly with no residue.
+
+The UI is deliberately thin. All decision logic lives in `SleepGuardCore` and is
+unit-tested without touching live state:
+
+- `ScanPresenter` attaches a **generation token** to every scan. A completion
+  publishes only if its token is still the **in-flight** generation, so a
+  refresh during an in-flight scan is harmless, an out-of-order completion
+  cannot overwrite a newer result or clear the newer scan's busy flag, and a
+  duplicated callback cannot publish twice. Comparing against the last *issued*
+  token instead was a real fail-open caught in review: on a fresh presenter both
+  counters were `0`, so a caller passing a default token published an
+  affirmative clean verdict with no scan having run. Regression-tested.
+- Starting a scan **clears the previous result**. Rows from a finished scan are
+  never shown as current evidence — the holder they name may already have
+  exited.
+- A published result carries the **time it was observed**, shown as "as of
+  HH:MM:SS". Power-assertion state changes second to second, so a redisplayed
+  result must be attributable to when it was actually read.
+- Terminal notices render **before** any row detail and do not depend on a
+  selected row, so "nothing found blocking sleep" is still visible when a scan
+  legitimately returns zero rows. A read failure and an undetermined verdict are
+  each rendered distinctly and never as a clean result.
+- `BlockerRow.id` is a synthetic per-scan identity, never a display name (two
+  processes can share one) and never used as a live handle. This build takes no
+  actions, so there is no path that could target a stale PID.
 
 Exit codes, in precedence order:
 
@@ -148,18 +198,49 @@ the status code.
 
 ## Classification authority
 
-Every assertion type is classified only on a citable `IOPMLib.h` statement.
-A type with no citation is left **unclassified** and makes the scan incomplete —
-it is never assumed harmless.
+A type is classified as **blocking** only on a citable `IOPMLib.h` statement, or
+— for one deprecated-but-still-live type — on a conservative measured basis that
+is spelled out below rather than dressed up as a citation. A type is certified
+**harmless** only on a citable statement, with no exceptions. A type with
+neither is left **unclassified** and makes the scan incomplete; it is never
+assumed harmless.
 
-| Type | Verdict | Header citation |
+| Type | Verdict | Basis |
 |---|---|---|
-| `PreventUserIdleSystemSleep` | blocks | "will prevent the system from sleeping due to a period of idle user activity" |
-| `PreventSystemSleep` | blocks | documented system-sleep prevention |
-| `PreventUserIdleDisplaySleep` | blocks | "While the display is prevented from dimming, the system cannot go into idle sleep." |
-| `NetworkClientActive` | blocks | "this assertion can prevent system from going into idle sleep" |
-| `NoIdleSleepAssertion` | blocks | deprecated alias of the system-sleep type |
-| `PreventDiskIdle` | does not block | "The system may still sleep while this assertion is active." |
+| `PreventUserIdleSystemSleep` | blocks | `IOPMLib.h`: "will prevent the system from sleeping due to a period of idle user activity" |
+| `PreventSystemSleep` | blocks | **no header statement** — see the note below |
+| `PreventUserIdleDisplaySleep` | blocks | `IOPMLib.h`: "While the display is prevented from dimming, the system cannot go into idle sleep." |
+| `NetworkClientActive` | blocks | `IOPMLib.h`: "On battery, this assertion can prevent system from going into idle sleep." |
+| `NoIdleSleepAssertion` | blocks | `IOPMLib.h`: "Deprecated in 10.7. Please use assertion type `kIOPMAssertPreventUserIdleSystemSleep` instead." |
+| `PreventDiskIdle` | does not block | `IOPMLib.h`: "The system may still sleep while this assertion is active." |
+
+### The `PreventSystemSleep` exception, stated honestly
+
+`kIOPMAssertionTypePreventSystemSleep` carries **no** `IOPMLib.h` statement that
+it prevents sleep. Its entire documented text is a deprecation:
+
+> `@deprecated` Deprecated in 10.9. This assertion is not supported in any OS X
+> releases. `@abstract` This assertion is deprecated. Do not use it.
+> `@discussion` Please consider using either assertion type for system
+> activities: `kIOPMAssertRemoteAccess`, `kIOPMAssertPreventUserIdleSystemSleep`
+
+Earlier revisions of this table claimed a citation of "documented system-sleep
+prevention" for it. **That citation does not exist** in any IOKit header on
+macOS 15.7.4 — it was written from a plausible-sounding assumption, and an
+independent review caught it. It is corrected here rather than quietly dropped.
+
+It is nonetheless classified as **blocking**, on this explicit basis:
+
+- Despite the deprecation, it is **measured live and in active use**: on macOS
+  15.7.4 `screensharingd` holds `PreventSystemSleep` with the reason "Remote
+  user is connected", and `pmset -g assertions` agrees.
+- The header directs its callers to `kIOPMAssertPreventUserIdleSystemSleep`,
+  which *is* header-cited as blocking idle sleep.
+- Classifying it as blocking is the **fail-closed** direction. Treating a
+  possible blocker as a blocker can never manufacture a false clean verdict; the
+  reverse could. Leaving it unclassified would also be safe (it would force an
+  undetermined verdict), but reporting a named, actionable holder is more useful
+  and equally conservative.
 
 `UserIsActive`, `BackgroundTask`, and similar names that appear in `pmset`
 output but in no IOKit header are deliberately **not** enumerated as harmless.
@@ -180,6 +261,16 @@ The two live-IOKit integration checks are opt-in behind `RUN_LIVE_TESTS=1`
 assert on real system state, so on a restricted or sandboxed host they would
 report a product defect that does not exist. When the gate is off the run prints
 an explicit `SKIP:` line — never a silent pass. CI runs both modes.
+
+Measured on macOS 15.7.4 (x86_64): **241** assertions unit-only. That figure is
+deterministic and host-independent — the unit tests inject deterministic fakes
+and never let a synthetic PID reach a live resolver.
+
+The `RUN_LIVE_TESTS=1` total is **host-dependent by design**: the live checks
+assert once per live assertion record, so the number tracks how many assertions
+the machine actually holds. It was **310** across repeated runs on one idle host
+and an independent reviewer observed **310–314** on the same machine as state
+changed. A different total is not a regression; a `FAIL:` line is.
 
 Coverage: assertion-type classification (blocking, known-non-blocking, and
 unknown types), decoding of the `IOPMCopyAssertionsByProcess` dictionary shape,

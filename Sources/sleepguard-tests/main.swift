@@ -1255,6 +1255,17 @@ func testLiveSleepDisabledLookupReturnsAKnownValueOnThisHost() {
   Harness.expect(setting != nil, "SleepDisabled must resolve to a known boolean on macOS")
 }
 
+testBlockerRowsGetStableIdentityThatSurvivesDuplicateDisplayNames()
+testAnOutOfOrderScanCompletionCannotOverwriteANewerResult()
+testRefreshWhileScanningIsHarmlessAndSupersedesRatherThanDuplicates()
+testTerminalNoticeSurvivesTheTargetLeavingDiscoveryAndNeverReadsAsClean()
+testAnIncompleteScanIsPresentedAsUndeterminedRatherThanClean()
+testOnlyTheInFlightGenerationMayPublishSoNoScanCannotYieldAVerdict()
+testStartingAScanClearsThePreviousResultSoStaleEvidenceIsNotShownAsCurrent()
+testAPublishedReportCarriesTheObservationTimeSoStalenessIsVisible()
+testAReadFailureBecomesAFailureOutcomeNotAnEmptyCleanScan()
+testTheRunnerCarriesDecoderCompletenessIntoTheReportRatherThanDroppingIt()
+testTheRunnerPassesTheTriStateSleepDisabledSettingThroughUnflattened()
 testLiveTestGateOptsInOnlyForAnExplicitTruthyValue()
 testDriverAssertionsDecodeRealIORegistryShapeWithOwnerAttribution()
 testDriverAssertionsFailClosedOnEveryUnreadableOrMalformedShape()
@@ -1295,3 +1306,331 @@ if LiveTestGate.isEnabled(environment: ProcessInfo.processInfo.environment) {
   print("SKIP: live IOKit tests (set \(LiveTestGate.variableName)=1 to run them)")
 }
 Harness.finish()
+
+// MARK: - Presentation model (non-CLI surface, slice 1)
+
+func testBlockerRowsGetStableIdentityThatSurvivesDuplicateDisplayNames() {
+  // Two distinct processes can carry the identical display name. A UI keyed on
+  // the name would show one row's evidence under the other's heading.
+  let first = AssertionObservation(
+    assertionID: 11, pid: 501, processName: "screensharingd",
+    rawType: "PreventSystemSleep", humanName: "Remote user is connected", heldSeconds: 60)
+  let second = AssertionObservation(
+    assertionID: 12, pid: 802, processName: "screensharingd",
+    rawType: "PreventSystemSleep", humanName: "Remote user is connected", heldSeconds: 60)
+  let diagnosis = SleepDiagnosis(
+    observations: [first, second], sleepDisabledSetting: false, sourceWasComplete: true)
+  let report = SleepScanReport(
+    diagnosis: diagnosis,
+    aggregate: AggregateAssertionStatus(levels: ["PreventSystemSleep": 1], malformedEntryCount: 0),
+    driver: DriverAssertionStatus(
+      aggregateBits: 0, records: [], malformedRecordCount: 0,
+      detailedPayloadWasUnreadable: false))
+
+  Harness.equal(report.blockerRows.count, 2, "both same-named holders must get their own row")
+  Harness.expect(
+    report.blockerRows[0].id != report.blockerRows[1].id,
+    "identical display names must not collapse to one identity")
+  Harness.equal(
+    Set(report.blockerRows.map { $0.title }).count, 1,
+    "the titles really are identical, so identity cannot be derived from them")
+}
+
+func makeReport(processName: String, pid: Int32, assertionID: UInt64) -> SleepScanReport {
+  SleepScanReport(
+    diagnosis: SleepDiagnosis(
+      observations: [
+        AssertionObservation(
+          assertionID: assertionID, pid: pid, processName: processName,
+          rawType: "PreventSystemSleep", humanName: "reason", heldSeconds: 5)
+      ],
+      sleepDisabledSetting: false, sourceWasComplete: true),
+    aggregate: AggregateAssertionStatus(levels: ["PreventSystemSleep": 1], malformedEntryCount: 0),
+    driver: DriverAssertionStatus(
+      aggregateBits: 0, records: [], malformedRecordCount: 0,
+      detailedPayloadWasUnreadable: false))
+}
+
+func testAnOutOfOrderScanCompletionCannotOverwriteANewerResult() {
+  // Two refreshes are started; the FIRST one finishes last. Publishing it would
+  // show the user stale evidence with no indication that it is stale.
+  let model = ScanPresenter()
+  let firstToken = model.beginScan()
+  let secondToken = model.beginScan()
+  Harness.expect(firstToken != secondToken, "each scan must get its own generation token")
+
+  model.publish(
+    .success(makeReport(processName: "newer", pid: 2, assertionID: 20)), token: secondToken)
+  Harness.equal(model.rows.first?.title, "newer", "the newest completion must be visible")
+
+  model.publish(
+    .success(makeReport(processName: "stale", pid: 1, assertionID: 10)), token: firstToken)
+  Harness.equal(
+    model.rows.first?.title, "newer",
+    "a completion from a superseded generation must be discarded, not published")
+  Harness.expect(!model.isScanning, "the newest completion ended the active scan")
+}
+
+func testRefreshWhileScanningIsHarmlessAndSupersedesRatherThanDuplicates() {
+  let model = ScanPresenter()
+  Harness.expect(!model.isScanning, "a fresh presenter is idle")
+  let first = model.beginScan()
+  Harness.expect(model.isScanning, "beginScan marks work active so refresh can be disabled")
+  let second = model.beginScan()
+  model.publish(.success(makeReport(processName: "a", pid: 1, assertionID: 1)), token: first)
+  Harness.expect(
+    model.isScanning,
+    "a stale completion must not clear the busy flag of the newer in-flight scan")
+  Harness.equal(model.rows.count, 0, "and it must not publish rows either")
+  model.publish(.success(makeReport(processName: "b", pid: 2, assertionID: 2)), token: second)
+  Harness.expect(!model.isScanning, "the current generation's completion clears the busy flag")
+  Harness.equal(model.rows.count, 1, "exactly one scan's rows are shown, never both merged")
+}
+
+func testTerminalNoticeSurvivesTheTargetLeavingDiscoveryAndNeverReadsAsClean() {
+  let model = ScanPresenter()
+
+  // No scan has run. This must NOT read as "nothing is blocking sleep".
+  Harness.expect(model.notice == nil, "an unrun scan has no verdict at all")
+  Harness.equal(model.rows.count, 0, "and no rows")
+
+  // A blocker was found, then the holder exited and the next scan is empty.
+  // The empty scan is a legitimate clean result and must say so, but the
+  // distinction from the failure case below must be preserved.
+  let firstToken = model.beginScan()
+  model.publish(
+    .success(makeReport(processName: "screensharingd", pid: 9, assertionID: 90)), token: firstToken)
+  Harness.equal(model.notice, "Sleep is being blocked.", "a found blocker is stated plainly")
+  Harness.equal(model.rows.count, 1, "with its row")
+
+  let emptyReport = SleepScanReport(
+    diagnosis: SleepDiagnosis(
+      observations: [], sleepDisabledSetting: false, sourceWasComplete: true),
+    aggregate: AggregateAssertionStatus(levels: ["UserIsActive": 1], malformedEntryCount: 0),
+    driver: DriverAssertionStatus(
+      aggregateBits: 0, records: [], malformedRecordCount: 0,
+      detailedPayloadWasUnreadable: false))
+  let secondToken = model.beginScan()
+  model.publish(.success(emptyReport), token: secondToken)
+  Harness.equal(model.rows.count, 0, "the holder is gone, so there is no row to select")
+  Harness.equal(
+    model.notice, "Nothing found blocking sleep.",
+    "the terminal notice must render with zero rows, not fall back to an empty view")
+
+  // A failed read must not be reported as the same clean verdict.
+  let thirdToken = model.beginScan()
+  model.publish(.failure("IOKit table unreadable"), token: thirdToken)
+  Harness.equal(model.rows.count, 0, "a failed scan publishes no rows")
+  Harness.expect(
+    model.notice?.contains("Scan failed") == true,
+    "a read failure must be labelled a failure")
+  Harness.expect(
+    model.notice != "Nothing found blocking sleep.",
+    "a failed read must never be presented as a clean result")
+  Harness.expect(model.report == nil, "and must not leave the previous report visible as current")
+}
+
+func testAnIncompleteScanIsPresentedAsUndeterminedRatherThanClean() {
+  // sourceWasComplete=false: SleepGuardCore's verdict is nil. The UI must not
+  // turn "could not determine" into an affirmative clean answer.
+  let incomplete = SleepScanReport(
+    diagnosis: SleepDiagnosis(
+      observations: [], sleepDisabledSetting: false, sourceWasComplete: false),
+    aggregate: AggregateAssertionStatus(levels: ["UserIsActive": 1], malformedEntryCount: 0),
+    driver: DriverAssertionStatus(
+      aggregateBits: 0, records: [], malformedRecordCount: 0,
+      detailedPayloadWasUnreadable: false))
+  Harness.expect(
+    incomplete.diagnosis.systemSleepIsBlocked(
+      aggregate: incomplete.aggregate, driver: incomplete.driver) == nil,
+    "precondition: the core reports this scan as undetermined")
+
+  let model = ScanPresenter()
+  let token = model.beginScan()
+  model.publish(.success(incomplete), token: token)
+  Harness.expect(
+    model.notice?.contains("Could not determine") == true,
+    "an undetermined verdict must be stated as undetermined")
+  Harness.expect(
+    model.notice != "Nothing found blocking sleep.",
+    "and must never be rendered as clean")
+}
+
+/// Deterministic stand-in for the live IOKit reader.
+///
+/// This fake carries NO live identifiers. It is deliberately not constructed
+/// from a real PID or BSD device name: a synthetic identifier that happens to
+/// exist on the host would make these assertions depend on machine state.
+struct FakeScanSource: SleepScanSource {
+  var snapshotResult: Result<DecodedAssertions, Error>
+  var aggregate: AggregateAssertionStatus
+  var driver: DriverAssertionStatus
+  var sleepDisabled: Bool?
+
+  func readSnapshot() throws -> DecodedAssertions { try snapshotResult.get() }
+  func readAggregate() -> AggregateAssertionStatus { aggregate }
+  func readDriver() -> DriverAssertionStatus { driver }
+  func readSleepDisabledSetting() -> Bool? { sleepDisabled }
+}
+
+struct FakeScanError: Error, CustomStringConvertible {
+  var description: String { "simulated IOKit failure" }
+}
+
+func testAReadFailureBecomesAFailureOutcomeNotAnEmptyCleanScan() {
+  let source = FakeScanSource(
+    snapshotResult: .failure(FakeScanError()),
+    aggregate: AggregateAssertionStatus(levels: [:], malformedEntryCount: 0),
+    driver: DriverAssertionStatus(
+      aggregateBits: nil, records: [], malformedRecordCount: 0,
+      detailedPayloadWasUnreadable: true),
+    sleepDisabled: nil)
+
+  let outcome = SleepScanRunner(source: source).scan()
+  switch outcome {
+  case .failure(let message):
+    Harness.expect(
+      message.contains("simulated IOKit failure"),
+      "the underlying diagnostic must be preserved, not swallowed")
+  case .success:
+    Harness.expect(false, "a throwing snapshot read must not produce a success outcome")
+  }
+}
+
+func testTheRunnerCarriesDecoderCompletenessIntoTheReportRatherThanDroppingIt() {
+  // A snapshot with a malformed record is incomplete. If the runner built the
+  // diagnosis without that flag, the report would claim a provably clean scan.
+  let source = FakeScanSource(
+    snapshotResult: .success(
+      DecodedAssertions(observations: [], malformedRecordCount: 1, sourceTableWasNull: false)),
+    aggregate: AggregateAssertionStatus(levels: ["UserIsActive": 1], malformedEntryCount: 0),
+    driver: DriverAssertionStatus(
+      aggregateBits: 0, records: [], malformedRecordCount: 0,
+      detailedPayloadWasUnreadable: false),
+    sleepDisabled: false)
+
+  let outcome = SleepScanRunner(source: source).scan()
+  guard case .success(let report) = outcome else {
+    Harness.expect(false, "a readable snapshot must produce a success outcome")
+    return
+  }
+  Harness.expect(
+    !report.diagnosis.sourceWasComplete,
+    "the decoder's incompleteness must reach the report")
+  Harness.expect(
+    !report.diagnosis.canProveSleepIsUnblocked(
+      aggregate: report.aggregate, driver: report.driver),
+    "an incomplete snapshot must not yield a provably-clean verdict")
+  Harness.expect(
+    report.diagnosis.systemSleepIsBlocked(
+      aggregate: report.aggregate, driver: report.driver) == nil,
+    "and the verdict must be undetermined")
+}
+
+func testTheRunnerPassesTheTriStateSleepDisabledSettingThroughUnflattened() {
+  func report(sleepDisabled: Bool?) -> SleepScanReport? {
+    let source = FakeScanSource(
+      snapshotResult: .success(
+        DecodedAssertions(observations: [], malformedRecordCount: 0, sourceTableWasNull: false)),
+      aggregate: AggregateAssertionStatus(levels: ["UserIsActive": 1], malformedEntryCount: 0),
+      driver: DriverAssertionStatus(
+        aggregateBits: 0, records: [], malformedRecordCount: 0,
+        detailedPayloadWasUnreadable: false),
+      sleepDisabled: sleepDisabled)
+    guard case .success(let report) = SleepScanRunner(source: source).scan() else { return nil }
+    return report
+  }
+
+  Harness.expect(
+    report(sleepDisabled: nil)?.diagnosis.sleepDisabledSetting == nil,
+    "an unreadable standing setting must stay nil, not become false")
+  Harness.expect(
+    report(sleepDisabled: nil)?.diagnosis.systemSleepIsBlocked(
+      aggregate: AggregateAssertionStatus(levels: ["UserIsActive": 1], malformedEntryCount: 0),
+      driver: DriverAssertionStatus(
+        aggregateBits: 0, records: [], malformedRecordCount: 0,
+        detailedPayloadWasUnreadable: false)) == nil,
+    "an unknown standing setting makes the verdict undetermined")
+  Harness.equal(
+    report(sleepDisabled: true)?.diagnosis.sleepDisabledSetting, true,
+    "a read true must survive")
+  Harness.equal(
+    report(sleepDisabled: false)?.diagnosis.sleepDisabledSetting, false,
+    "a read false must survive")
+}
+
+func testOnlyTheInFlightGenerationMayPublishSoNoScanCannotYieldAVerdict() {
+  // Regression for a review finding proven by execution: the guard compared the
+  // token against the last *issued* generation rather than the *in-flight* one.
+  // On a fresh presenter both were 0, so a caller passing a zero/default token
+  // published an affirmative "Nothing found blocking sleep." with no scan ever
+  // having run. That is the exact fail-open this project exists to prevent.
+  let fresh = ScanPresenter()
+  let accepted = fresh.publish(
+    .success(makeReport(processName: "never-scanned", pid: 1, assertionID: 1)), token: 0)
+  Harness.expect(!accepted, "a presenter with no in-flight scan must accept no completion")
+  Harness.expect(fresh.notice == nil, "and must still have no verdict at all")
+  Harness.equal(fresh.rows.count, 0, "and no rows")
+
+  // A completion must also be single-shot: once a generation has been consumed
+  // the same token cannot publish again, or a duplicated callback would
+  // resurrect a finished scan's state after a later refresh superseded it.
+  let model = ScanPresenter()
+  let token = model.beginScan()
+  Harness.expect(
+    model.publish(.success(makeReport(processName: "first", pid: 2, assertionID: 2)), token: token),
+    "the in-flight generation publishes once")
+  Harness.expect(
+    !model.publish(
+      .failure("duplicate delivery"), token: token),
+    "the same generation must not be able to publish a second time")
+  Harness.equal(
+    model.rows.first?.title, "first",
+    "and the duplicate must not have overwritten the accepted result")
+  Harness.expect(
+    model.notice == "Sleep is being blocked.",
+    "nor its notice")
+}
+
+func testStartingAScanClearsThePreviousResultSoStaleEvidenceIsNotShownAsCurrent() {
+  // Review concern: rows from a finished scan stayed on screen during the next
+  // scan, so a holder that had since exited kept appearing as current evidence
+  // under a "Scanning…" label.
+  let model = ScanPresenter()
+  let first = model.beginScan()
+  model.publish(
+    .success(makeReport(processName: "gone-by-now", pid: 3, assertionID: 3)), token: first)
+  Harness.equal(model.rows.count, 1, "precondition: the first scan published a row")
+
+  model.beginScan()
+  Harness.equal(
+    model.rows.count, 0,
+    "a new scan must clear the previous rows rather than present them as current")
+  Harness.expect(
+    model.notice == nil,
+    "and must clear the previous verdict, which no longer describes the system")
+  Harness.expect(model.report == nil, "and the previous report")
+  Harness.expect(model.isScanning, "while marking work active")
+}
+
+func testAPublishedReportCarriesTheObservationTimeSoStalenessIsVisible() {
+  // Power-assertion state changes second to second. A result redisplayed later
+  // must be attributable to when it was actually observed.
+  let model = ScanPresenter()
+  let observed = Date(timeIntervalSince1970: 1_700_000_000)
+  let token = model.beginScan()
+  model.publish(
+    .success(makeReport(processName: "holder", pid: 4, assertionID: 4)),
+    token: token,
+    observedAt: observed)
+  Harness.equal(
+    model.lastScanDate, observed,
+    "the presenter must retain the observation time it was given")
+
+  // And it must be cleared with the rest of the state when a new scan starts,
+  // so a stale timestamp cannot outlive the result it described.
+  model.beginScan()
+  Harness.expect(
+    model.lastScanDate == nil,
+    "a new scan clears the previous observation time along with its result")
+}

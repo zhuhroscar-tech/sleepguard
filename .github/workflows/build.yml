@@ -52,3 +52,38 @@ jobs:
             0|2|3) ;;
             *) echo "unexpected exit status $status"; exit 1 ;;
           esac
+
+      - name: Package the menu-bar app and verify the artifact
+        # Verifies the bundle it would actually distribute: plist validity,
+        # declared version, the executable named by CFBundleExecutable (read
+        # from the built plist, never hardcoded), architecture, and signature.
+        # The signature is ad-hoc; this step deliberately asserts that it is NOT
+        # a Developer ID signature so a notarization claim cannot creep in.
+        run: |
+          bash scripts/build_app.sh
+          APP="dist/SleepGuard.app"
+          plutil -lint "$APP/Contents/Info.plist"
+          EXEC=$(plutil -extract CFBundleExecutable raw "$APP/Contents/Info.plist")
+          echo "declared executable: $EXEC"
+          test -x "$APP/Contents/MacOS/$EXEC"
+          file "$APP/Contents/MacOS/$EXEC"
+          test "$(plutil -extract LSUIElement raw "$APP/Contents/Info.plist")" = "true"
+          codesign --verify --deep --strict "$APP"
+          if codesign -dv "$APP" 2>&1 | grep -q "Authority=Developer ID"; then
+            echo "unexpected Developer ID signature; this project claims ad-hoc only"
+            exit 1
+          fi
+
+      - name: Verify the extracted archive, not just the pre-archive bundle
+        run: |
+          cd dist
+          ditto -c -k --keepParent SleepGuard.app SleepGuard.zip
+          mkdir -p extracted
+          ditto -x -k SleepGuard.zip extracted
+          APP="extracted/SleepGuard.app"
+          plutil -lint "$APP/Contents/Info.plist"
+          EXEC=$(plutil -extract CFBundleExecutable raw "$APP/Contents/Info.plist")
+          test -x "$APP/Contents/MacOS/$EXEC"
+          plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist"
+          codesign --verify --deep --strict "$APP"
+          echo "extracted archive verified"

@@ -18,7 +18,13 @@ public enum AssertionReadError: Error, CustomStringConvertible {
 ///
 /// Safety boundary: this type only *reads*. It never creates, releases, or
 /// otherwise mutates an assertion, and never signals or terminates a process.
-public struct IOKitAssertionReader {
+///
+/// `Sendable` is accurate rather than decorative: this struct has no stored
+/// properties at all. Every IOKit handle it touches is created, used and
+/// released inside a single method body, so no non-`Sendable` Foundation or
+/// CoreFoundation object is ever held across a suspension or shared between
+/// isolation domains.
+public struct IOKitAssertionReader: Sendable {
   public init() {}
 
   public func snapshot(now: Date = Date()) throws -> DecodedAssertions {

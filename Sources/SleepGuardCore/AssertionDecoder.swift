@@ -14,11 +14,13 @@ public struct DecodedAssertions: Sendable {
 
   /// True when the table decoded without error but yielded no assertion at all.
   ///
-  /// A running macOS system always holds at least one process assertion (the
-  /// window server tickles `UserIsActive`, `powerd` holds bookkeeping
-  /// assertions). A zero-observation table therefore indicates a broken or
-  /// permission-denied read path, not an idle Mac, so it is treated as
-  /// unproven rather than clean.
+  /// Every macOS host this project has measured held at least one process
+  /// assertion (the window server tickles `UserIsActive`, `powerd` holds
+  /// bookkeeping assertions) — observed on macOS 15.7.4 and on a GitHub
+  /// macos-15 runner. No Apple documentation guarantees this, so a
+  /// zero-observation table is *treated* as a broken or permission-denied read
+  /// path rather than an idle Mac. That is the fail-closed reading: it can only
+  /// withhold a clean verdict, never manufacture one.
   public var hasImplausiblyEmptyTable: Bool {
     observations.isEmpty && malformedRecordCount == 0 && !sourceTableWasNull
   }

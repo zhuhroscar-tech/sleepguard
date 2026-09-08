@@ -45,13 +45,35 @@ public struct SleepDiagnosis: Sendable {
   /// snapshot full of undecodable records.
   public let sourceWasComplete: Bool
 
-  /// Assertion types documented in IOPMLib.h as preventing system idle sleep.
+  /// Assertion types this build treats as preventing system idle sleep.
   ///
+  /// Four of the five carry a citable IOPMLib.h statement.
   /// `PreventUserIdleDisplaySleep` is included deliberately: IOPMLib.h states
   /// "While the display is prevented from dimming, the system cannot go into
   /// idle sleep." `NetworkClientActive` likewise: "Keeps the system awake while
   /// OS X serves active network clients... On battery, this assertion can
   /// prevent system from going into idle sleep."
+  ///
+  /// **`PreventSystemSleep` is the one exception and has NO header statement.**
+  /// Verified against the macOS 15.7.4 SDK: the only text attached to
+  /// `kIOPMAssertionTypePreventSystemSleep` (IOPMLib.h:1013-1023) is a
+  /// deprecation notice — "Deprecated in 10.9. This assertion is not supported
+  /// in any OS X releases. This assertion is deprecated. Do not use it." — which
+  /// says nothing about sleep in either direction. An earlier revision of this
+  /// comment and of the README claimed a citation of "documented system-sleep
+  /// prevention"; that citation does not exist and an independent review caught
+  /// it. It is retained as a blocker on a measured, fail-closed basis instead:
+  /// the type is still live in practice (macOS 15.7.4: `screensharingd` holds it
+  /// with the reason "Remote user is connected", corroborated by
+  /// `pmset -g assertions`), and the header redirects its callers to
+  /// `kIOPMAssertPreventUserIdleSystemSleep`, which *is* cited as blocking idle
+  /// sleep. Classifying a possible blocker as blocking can never manufacture a
+  /// false clean verdict; the reverse could. See README "Classification
+  /// authority".
+  ///
+  /// Note the asymmetry this preserves: a *blocking* verdict may rest on a
+  /// documented measurement, but `knownNonBlockingTypes` — certifying something
+  /// harmless — still requires a literal header citation, with no exceptions.
   public static let systemSleepBlockingTypes: Set<String> = [
     "NoIdleSleepAssertion",
     "PreventUserIdleSystemSleep",
@@ -127,8 +149,13 @@ public struct SleepDiagnosis: Sendable {
   /// not document — if a level ever does carry a count, a surplus is reported;
   /// under the measured 0/1 behavior it reduces to presence subtraction.
   ///
-  /// `NoIdleSleepAssertion` is normalized to `PreventUserIdleSystemSleep`:
-  /// IOPMLib.h documents the former as the deprecated alias of the latter, and
+  /// `NoIdleSleepAssertion` is normalized to `PreventUserIdleSystemSleep`.
+  /// IOPMLib.h:1025-1030 does not use the words "alias" or "identical" for it —
+  /// its full text is "Deprecated in 10.7. Please use assertion type
+  /// kIOPMAssertPreventUserIdleSystemSleep instead." (Contrast
+  /// IOPMLib.h:1001 and :1008, which do say "identical to" for other types; the
+  /// distinction is preserved here rather than paraphrased away.) The
+  /// normalization rests on that documented redirect plus the measured fact that
   /// the aggregate table publishes only the modern name.
   public func unattributedBlockingTypes(
     aggregate: AggregateAssertionStatus
