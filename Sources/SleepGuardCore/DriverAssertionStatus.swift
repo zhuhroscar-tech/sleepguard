@@ -250,24 +250,26 @@ public struct DriverAssertionStatus: Sendable {
   /// bitfield or level is never negative, and must not read as "nothing set"),
   /// and any value that is not exactly representable as an `Int`.
   ///
-  /// Which guard rejects what, measured on this platform rather than assumed.
-  /// The guards overlap heavily; the honest summary is which is the *sole*
-  /// catcher for each class:
+  /// Which guard rejects what. The guards overlap, and crucially the split is
+  /// **architecture-dependent**, so both are load-bearing and neither may be
+  /// removed:
   /// * `candidate >= 0` is the sole catcher for a negative already in range
   ///   (`-1`), which round-trips through `doubleValue` perfectly.
   /// * `Double(candidate) == number.doubleValue` is the sole catcher for a
   ///   fractional value in range (`4.7` truncates to `4`, `0.5` to `0`) — the
   ///   case where `intValue` yields a plausible-looking integer the kernel
   ///   never reported.
-  /// * Both reject a value that saturates or wraps `intValue`: `1e19`, NaN and
-  ///   infinity all saturate to `Int.min`, and a `UInt64` above `Int.max`
-  ///   truncates to a negative. Each fails `>= 0` *and* fails the `doubleValue`
-  ///   round-trip, so neither guard is load-bearing alone there.
+  /// * For a value that is not an `Int` at all (`1e19`, NaN, infinity) *which*
+  ///   guard fires depends on the host. Measured: on x86_64 all three saturate
+  ///   `intValue` to `Int.min`, so `>= 0` rejects them; on arm64 NaN yields `0`
+  ///   and `1e19`/infinity yield `Int.max`, all of which pass `>= 0`, leaving
+  ///   the `doubleValue` round-trip as the sole catcher. CI on an arm64 runner
+  ///   is what established this — a test asserting the x86_64 value failed
+  ///   there. The rejection is invariant; the mechanism is not.
   /// * `Int64(candidate) == number.int64Value` is a tautology here: Swift's
-  ///   `NSNumber.intValue` is typed `Int`, 64-bit on this platform, so it
-  ///   cannot disagree with `int64Value`. Measured, it rejects nothing. It is
-  ///   retained only against a 32-bit `Int` platform, where `intValue` would
-  ///   truncate.
+  ///   `NSNumber.intValue` is typed `Int`, 64-bit on both architectures above,
+  ///   so it cannot disagree with `int64Value`. It is retained only against a
+  ///   32-bit `Int` platform, where `intValue` would truncate.
   ///
   /// Note that a giant exactly representable as `Int64` (`2^53 + 1`,
   /// `Int64.max`) is *accepted* even though its `Double` form is lossy: both

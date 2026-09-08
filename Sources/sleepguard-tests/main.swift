@@ -1121,23 +1121,28 @@ func testNonIntegralOrOversizedNumbersAreRejectedRatherThanTruncated() {
   Harness.expect(
     NSNumber(value: 4.7).intValue >= 0,
     "4.7 truncates to a non-negative Int, so only the doubleValue guard rejects it")
-  // Claim 3: 1e19, NaN and infinity saturate intValue to Int.min, so BOTH the
-  // >= 0 guard and the doubleValue round-trip reject them. Neither is alone.
+  // Claim 3: for a value that cannot be an Int at all — 1e19, NaN, infinity —
+  // the REJECTION is the invariant, not the mechanism.
+  //
+  // The mechanism is architecture-dependent, which CI proved when an earlier
+  // version of this test asserted the x86_64 saturation value and failed on an
+  // arm64 runner. On x86_64 all three saturate intValue to Int.min, so the
+  // >= 0 guard rejects them; on arm64 NaN yields 0 and 1e19/infinity yield
+  // Int.max, all of which PASS >= 0, leaving the doubleValue round-trip as the
+  // sole catcher. Both guards are therefore load-bearing depending on the
+  // host, and neither may be removed.
+  //
+  // So this asserts what must hold everywhere: the doubleValue round-trip
+  // fails, and decode rejects the value and marks the view incomplete.
   for (label, value) in [("1e19", 1e19), ("NaN", Double.nan), ("infinity", Double.infinity)] {
     let n = NSNumber(value: value)
-    Harness.equal(n.intValue, Int.min, "\(label) saturates intValue to Int.min")
     Harness.expect(
       Double(n.intValue) != n.doubleValue,
-      "\(label) also fails the doubleValue round-trip, so the guards overlap")
-  }
-
-  // NaN and infinity must not decode either; both would make intValue
-  // meaningless.
-  for (label, value) in [("NaN", Double.nan), ("infinity", Double.infinity)] {
-    let bad = DriverAssertionStatus.decode(
-      aggregateValue: NSNumber(value: value), detailedValue: [[String: Any]]())
-    Harness.expect(bad.aggregateBits == nil, "\(label) is not a bitfield")
-    Harness.expect(!bad.isComplete, "\(label) makes the view incomplete")
+      "\(label) fails the doubleValue round-trip on every architecture")
+    let decoded = DriverAssertionStatus.decode(
+      aggregateValue: n, detailedValue: [[String: Any]]())
+    Harness.expect(decoded.aggregateBits == nil, "\(label) is never accepted as a bitfield")
+    Harness.expect(!decoded.isComplete, "\(label) makes the view incomplete")
   }
 
   // And a well-formed integral value still decodes, including one stored as a
