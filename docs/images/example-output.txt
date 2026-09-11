@@ -1,0 +1,8 @@
+$ ./sleepguard
+Idle sleep is blocked by 1 assertion(s):
+  • ChatGPT (pid 1904)
+      type: NoIdleSleepAssertion
+      name: com.openai.chat
+      held: 30h 12m
+
+Quitting the owning app releases its assertion; sleepguard will not do it for you.

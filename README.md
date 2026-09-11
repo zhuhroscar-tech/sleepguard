@@ -13,15 +13,7 @@ background process is keeping it awake and for how long. It only looks and
 reports — it never quits an app, changes a power setting, or does anything
 else on your behalf.
 
-```text
-$ ./sleepguard
-Idle sleep is blocked by 1 assertion(s):
-  • ChatGPT (pid 1904)
-      type: NoIdleSleepAssertion
-      name: com.openai.chat
-      held: 30h 12m
-Quitting the owning app releases its assertion; sleepguard will not do it for you.
-```
+![sleepguard example output](docs/images/example-output.png)
 
 `sleepguard` answers one question: *why will this Mac not go to sleep?* It reads
 the live IOKit power-assertion table, names the process holding each
