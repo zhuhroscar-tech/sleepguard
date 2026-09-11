@@ -1,6 +1,27 @@
 # sleepguard — read-only macOS sleep-blocker inspector
 
+[![build](https://github.com/zhuhroscar-tech/sleepguard/actions/workflows/build.yml/badge.svg)](https://github.com/zhuhroscar-tech/sleepguard/actions/workflows/build.yml)
+![macOS 13+](https://img.shields.io/badge/macOS-13%2B-111111?logo=apple)
+
 **Status: development prototype. Not a release. Not notarized. Not signed with a Developer ID.**
+
+## Simple explanation
+
+Ever wonder why your Mac won't go to sleep? `sleepguard` looks at the same
+low-level data macOS itself uses and tells you, in plain English, which app or
+background process is keeping it awake and for how long. It only looks and
+reports — it never quits an app, changes a power setting, or does anything
+else on your behalf.
+
+```text
+$ ./sleepguard
+Idle sleep is blocked by 1 assertion(s):
+  • ChatGPT (pid 1904)
+      type: NoIdleSleepAssertion
+      name: com.openai.chat
+      held: 30h 12m
+Quitting the owning app releases its assertion; sleepguard will not do it for you.
+```
 
 `sleepguard` answers one question: *why will this Mac not go to sleep?* It reads
 the live IOKit power-assertion table, names the process holding each
