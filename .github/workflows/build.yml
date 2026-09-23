@@ -34,6 +34,9 @@ jobs:
           RUN_LIVE_TESTS: "1"
         run: swift run sleepguard-tests
 
+      - name: Repository contract tests
+        run: python3 -m unittest discover -s Tests/RepositoryContractTests -v
+
       - name: Release build (warnings as errors)
         run: swift build -c release -Xswiftc -warnings-as-errors
 
