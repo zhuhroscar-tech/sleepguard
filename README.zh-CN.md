@@ -10,6 +10,8 @@
 
 [演示视频](docs/demo.mp4)
 
+[更新日志](CHANGELOG.md)
+
 ## 构建与运行
 
 需要 macOS 13+、Swift 6.1+ 工具链及 macOS SDK。

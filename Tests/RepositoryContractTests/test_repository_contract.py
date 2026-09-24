@@ -11,6 +11,7 @@ class RepositoryContractTests(unittest.TestCase):
         for relative in [
             "README.md",
             "README.zh-CN.md",
+            "CHANGELOG.md",
             "LICENSE",
             "Package.swift",
             "scripts/build_app.sh",
@@ -62,11 +63,19 @@ class RepositoryContractTests(unittest.TestCase):
     def test_release_claims_remain_local_and_unsigned(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         zh_readme = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         build_script = (ROOT / "scripts/build_app.sh").read_text(encoding="utf-8")
         self.assertIn("Development prototype—not a signed or notarized release", readme)
         self.assertIn("开发原型，不是经过正式签名或公证的发行版", zh_readme)
+        self.assertIn("not Developer ID signed or notarized app distributions", changelog)
         self.assertIn("NOT Developer ID signing and NOT notarization", build_script)
         self.assertIn('codesign --force --sign - --timestamp=none "$APP"', build_script)
+
+    def test_changelog_tracks_latest_release(self):
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertIn("## v0.2.0 — 2026-09-23", changelog)
+        self.assertIn("SleepGuard.zip", changelog)
+        self.assertIn("ad-hoc signed local build artifact", changelog)
 
 
 if __name__ == "__main__":

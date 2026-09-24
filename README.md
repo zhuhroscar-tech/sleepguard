@@ -10,6 +10,8 @@ A read-only macOS sleep-blocker inspector with a CLI and menu-bar app. It reads 
 
 [Demo video](docs/demo.mp4)
 
+[Changelog](CHANGELOG.md)
+
 ## Build and run
 
 Requires macOS 13+ and a Swift 6.1+ toolchain with the macOS SDK.
