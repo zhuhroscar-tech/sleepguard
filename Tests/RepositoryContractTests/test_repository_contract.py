@@ -60,6 +60,10 @@ class RepositoryContractTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, workflow)
 
+    def test_ci_runs_for_release_tags(self):
+        workflow = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
+        self.assertIn("tags: [\"v*\"]", workflow)
+
     def test_release_claims_remain_local_and_unsigned(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         zh_readme = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
@@ -73,6 +77,8 @@ class RepositoryContractTests(unittest.TestCase):
 
     def test_changelog_tracks_latest_release(self):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertIn("## v0.2.2 — 2026-09-25", changelog)
+        self.assertIn("## v0.2.1 — 2026-09-24", changelog)
         self.assertIn("## v0.2.0 — 2026-09-23", changelog)
         self.assertIn("SleepGuard.zip", changelog)
         self.assertIn("ad-hoc signed local build artifact", changelog)
